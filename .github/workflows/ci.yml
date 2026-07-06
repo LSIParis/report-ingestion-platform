@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff==0.8.6
+      - name: Ruff check
+        run: ruff check app scripts tests
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: reports
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Migrations : rôle propriétaire
+      DATABASE_URL_MIGRATE: postgresql://postgres:postgres@localhost:5432/reports
+      # Plan utilisateur (scopé RLS) et plan système (bypass)
+      DATABASE_URL_API: postgresql://app_api:app_api@localhost:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@localhost:5432/reports
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Install backend (+ dev)
+        run: pip install ".[dev]"
+
+      # Rôles LOGIN app_api / app_worker (miroir de infra/init-roles.sql) AVANT les migrations,
+      # pour que 0002_rls trouve les rôles existants et se contente de GRANT + policies.
+      - name: Create DB roles
+        run: psql "$DATABASE_URL_MIGRATE" -v ON_ERROR_STOP=1 -f ../infra/init-roles.sql
+
+      - name: Apply migrations (schema + RLS)
+        run: alembic upgrade head
+
+      # Test d'isolation cross-tenant = garde-fou NON négociable (SPEC.md §10, CLAUDE.md).
+      - name: Run tests
+        run: pytest -v

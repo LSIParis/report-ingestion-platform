@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import email as email_lib
-import mimetypes
 from email.message import Message
 
 import structlog
