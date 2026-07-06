@@ -1,0 +1,12 @@
+{
+  "profile_id": "acme_xlsx",
+  "tenant_id": "acme",
+  "format": "xlsx",
+  "detection": { "sheet_name": "Ventes", "header_row": 2 },
+  "field_mapping": {
+    "Date Commande": { "target": "report_date", "type": "date", "format": "%d/%m/%Y" },
+    "Montant TTC":   { "target": "amount", "type": "decimal", "decimal_sep": "," },
+    "Réf Produit":   { "target": "product_ref", "type": "string", "required": true }
+  },
+  "validation": { "amount": { "min": 0 } }
+}

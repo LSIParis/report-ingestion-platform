@@ -1,0 +1,12 @@
+{
+  "profile_id": "acme_csv",
+  "tenant_id": "acme",
+  "format": "csv",
+  "detection": { "delimiter": ";" },
+  "field_mapping": {
+    "date": { "target": "report_date", "type": "date", "format": "%Y-%m-%d" },
+    "montant": { "target": "amount", "type": "decimal", "decimal_sep": "," },
+    "ref": { "target": "product_ref", "type": "string", "required": true }
+  },
+  "validation": { "amount": { "min": 0 } }
+}
