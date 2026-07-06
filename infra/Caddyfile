@@ -1,0 +1,27 @@
+# TLS automatique (Let's Encrypt). Requiert : ports 80/443 ouverts + DNS A/AAAA
+# pointant DOMAIN et FILES_DOMAIN vers l'IP du VPS.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# --- Application : front + API sur le même domaine (pas de CORS) ---
+{$DOMAIN} {
+	encode gzip
+
+	# /api/* → backend, préfixe retiré (/api/reports → /reports)
+	handle_path /api/* {
+		reverse_proxy api:8000
+	}
+
+	# tout le reste → SPA React
+	handle {
+		reverse_proxy frontend:80
+	}
+}
+
+# --- Object store : sous-domaine dédié pour les URLs signées MinIO ---
+# Caddy conserve le Host d'origine (FILES_DOMAIN) → la signature SigV4 reste valide.
+{$FILES_DOMAIN} {
+	reverse_proxy minio:9000
+}

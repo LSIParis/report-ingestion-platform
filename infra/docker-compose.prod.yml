@@ -1,0 +1,152 @@
+# Production — VPS. Base + MinIO NON exposés (seul Caddy publie 80/443).
+# Lancer : docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      FILES_DOMAIN: ${FILES_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, frontend, minio]
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reports
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-roles.sql:/docker-entrypoint-initdb.d/init-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 5
+    # pas de `ports:` → base injoignable depuis Internet
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+    # exposé UNIQUEMENT via Caddy (sous-domaine FILES_DOMAIN) pour les URLs signées
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb -p local/reports-raw;
+      exit 0;"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  migrate:
+    build: ../backend
+    command: alembic upgrade head
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL_MIGRATE: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/reports
+
+  api:
+    build: ../backend
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      JWT_PUBLIC_KEY_FILE: /keys/jwt_pub.pem
+      JWT_PRIVATE_KEY_FILE: /keys/jwt_priv.pem
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    volumes:
+      - ../keys:/keys:ro
+
+  worker:
+    build: ../backend
+    restart: unless-stopped
+    command: celery -A app.celery_app worker -l info --concurrency 4
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+  imap-worker:
+    build: ../backend
+    restart: unless-stopped
+    command: python -m app.workers.imap_worker
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      IMAP_HOST: ${IMAP_HOST}
+      IMAP_USER: ${IMAP_USER}
+      IMAP_PASSWORD: ${IMAP_PASSWORD}
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_URL: /api          # même domaine, Caddy route /api/* → api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:
+  redisdata:
+  caddy_data:
+  caddy_config:
