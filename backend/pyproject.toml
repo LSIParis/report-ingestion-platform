@@ -21,6 +21,8 @@ dependencies = [
   "redis==5.2.1",
   # Ingestion mail
   "imap-tools==1.7.4",
+  # Antivirus (client clamd)
+  "clamd==1.0.2",
   # Object store
   "boto3==1.35.92",
   # Parsing

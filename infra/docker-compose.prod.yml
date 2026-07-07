@@ -68,6 +68,18 @@ services:
       interval: 10s
       retries: 5
 
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
+    volumes:
+      - clamavdb:/var/lib/clamav       # base de signatures persistée (freshclam)
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s               # 1er démarrage : chargement de la base
+
   migrate:
     build: ../backend
     command: alembic upgrade head
@@ -107,6 +119,7 @@ services:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       minio: { condition: service_healthy }
+      clamav: { condition: service_started }
     environment:
       DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
       DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
@@ -116,6 +129,9 @@ services:
       S3_BUCKET: reports-raw
       S3_ACCESS_KEY: ${MINIO_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      ANTIVIRUS_ENABLED: "true"
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
 
   imap-worker:
     build: ../backend
@@ -148,5 +164,6 @@ volumes:
   pgdata:
   miniodata:
   redisdata:
+  clamavdb:
   caddy_data:
   caddy_config:

@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     jwt_audience: str = "report-dashboard"
     jwt_ttl_seconds: int = 3600
 
+    # --- Antivirus (ClamAV) ---
+    antivirus_enabled: bool = False        # actif en prod ; no-op si False
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+
     # --- Observabilité ---
     sentry_dsn: str = ""
 

@@ -151,7 +151,8 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 - [ ] Mots de passe DB/MinIO forts et uniques (`openssl rand`).
 - [ ] Comptes du seed remplacés par de vrais comptes.
 - [ ] Pare-feu : seuls 22/80/443 ouverts ; base et redis non exposés (aucun `ports:` public).
-- [ ] Antivirus des pièces jointes (ClamAV) branché avant mise en service (Sprint 5).
+- [x] Antivirus des pièces jointes (ClamAV) : service `clamav` inclus, scan actif en prod
+      (`ANTIVIRUS_ENABLED=true`). 1er démarrage ~2-3 min (chargement des signatures).
 - [ ] Sauvegardes testées (restauration vérifiée, pas seulement le dump).
 - [ ] `ACME_EMAIL` valide (notifications d'expiration de certificat).
 - [ ] Isolation multitenant : le test `pytest tests/test_tenant_isolation.py` passe.

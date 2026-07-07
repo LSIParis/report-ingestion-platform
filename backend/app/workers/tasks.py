@@ -14,6 +14,8 @@ from app.normalization.profiles import load_profile, select_profile
 from app.parsing.base import ParseResult
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
+from app.services import antivirus
+from app.services.antivirus import AntivirusUnavailable
 from app.services.audit import audit
 from app.storage import ObjectStore
 from app.tenant_resolver.resolver import TenantResolverService
@@ -44,20 +46,21 @@ def process_email(self, email_id: str) -> None:
         audit(actor="system", action="email.tenant_resolved", target_id=email_id,
               tenant_id=match.tenant_id, metadata={"method": match.method})
 
-        sources = _list_sources(email_id, match.tenant_id)
-        if not sources:
+        sources, infected = _list_sources(email_id, match.tenant_id)
+        if not sources and not infected:
             _set_status(email_id, "failed")
             audit(actor="system", action="email.failed", target_id=email_id,
                   tenant_id=match.tenant_id, metadata={"error": "no source"})
             return
 
         statuses = [_process_source(email_id, match.tenant_id, s) for s in sources]
+        statuses += ["failed"] * infected      # chaque PJ infectée compte comme un échec
         final = _aggregate(statuses)
         _set_status(email_id, final)
         audit(actor="system", action="email.processed", target_id=email_id,
               tenant_id=match.tenant_id, metadata={"result": final})
 
-    except TransientError as exc:
+    except (TransientError, AntivirusUnavailable) as exc:
         logger.warning("process.transient", error=str(exc))
         raise self.retry(exc=exc)
     except Exception as exc:  # noqa: BLE001
@@ -101,15 +104,16 @@ def _process_source(email_id: str, tenant_id: str, source: dict) -> str:
     return normalized.status
 
 
-def _list_sources(email_id: str, tenant_id: str) -> list[dict]:
-    """Relit le .eml brut, extrait les pièces jointes vers S3 + rows Attachment,
-    et renvoie la liste des sources parsables (une par PJ reconnue)."""
+def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
+    """Relit le .eml brut, SCANNE (antivirus) puis extrait les pièces jointes vers
+    S3 + rows Attachment. Renvoie (sources parsables, nb de PJ infectées)."""
     with get_session() as db:
         em = db.get(Email, email_id)
         raw_eml = store.get_default(em.raw_object_key)
 
     msg: Message = email_lib.message_from_bytes(raw_eml)
     sources: list[dict] = []
+    infected = 0
 
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
@@ -123,6 +127,18 @@ def _list_sources(email_id: str, tenant_id: str) -> list[dict]:
             continue  # format non géré → ignoré (traçable via metadata si besoin)
 
         payload = part.get_payload(decode=True) or b""
+
+        # --- Antivirus AVANT tout stockage/parsing ---
+        # VirusFound → on trace et on saute (jamais stocké, jamais parsé).
+        # AntivirusUnavailable se propage → retry du worker (fail-safe).
+        try:
+            antivirus.scan(payload)
+        except antivirus.VirusFound as v:
+            _record_infected(email_id, tenant_id, filename,
+                             part.get_content_type(), v.signature)
+            infected += 1
+            continue
+
         object_key = f"attachments/{email_id}/{filename}"
         store.put(object_key, payload,
                   content_type=part.get_content_type() or "application/octet-stream")
@@ -139,7 +155,31 @@ def _list_sources(email_id: str, tenant_id: str) -> list[dict]:
         sources.append({"type": "attachment", "fmt": fmt, "object_key": object_key,
                         "attachment_id": attachment_id, "filename": filename})
 
-    return sources
+    return sources, infected
+
+
+def _record_infected(email_id: str, tenant_id: str, filename: str,
+                     mime: str | None, signature: str) -> None:
+    """Trace une PJ infectée : Attachment (NON stockée) + Report échec +
+    parsing_error VIRUS_DETECTED → visible dans le dashboard. Le fichier
+    malveillant n'est jamais écrit dans l'object store."""
+    with get_session() as db:
+        att = Attachment(tenant_id=tenant_id, email_id=email_id, filename=filename,
+                         mime_type=mime, format=None,
+                         object_key="(infecté — non stocké)", size_bytes=None)
+        db.add(att)
+        db.flush()
+        rep = Report(tenant_id=tenant_id, email_id=email_id, attachment_id=att.id,
+                     source_type="attachment", status="failed", row_count=0)
+        db.add(rep)
+        db.flush()
+        db.add(ParsingError(tenant_id=tenant_id, email_id=email_id, report_id=rep.id,
+                            severity="fatal", code="VIRUS_DETECTED",
+                            message=f"Pièce jointe infectée : {signature}",
+                            context={"filename": filename, "signature": signature}))
+        db.commit()
+    audit(actor="system", action="attachment.infected", target_id=email_id,
+          tenant_id=tenant_id, metadata={"filename": filename, "signature": signature})
 
 
 def _set_status(email_id: str, status: str) -> None:
@@ -161,7 +201,8 @@ def _aggregate(statuses: list[str]) -> str:
 
 
 def _cleanup_previous(email_id: str) -> None:
-    """Supprime report/rows/errors du run précédent (plan worker, cross-tenant)."""
+    """Supprime report/rows/errors ET attachments du run précédent (plan worker,
+    cross-tenant) — pour que la reprise re-scanne et re-parse à neuf."""
     with get_session() as db:
         report_ids = [r.id for r in db.query(Report.id).filter_by(email_id=email_id).all()]
         if report_ids:
@@ -171,6 +212,9 @@ def _cleanup_previous(email_id: str) -> None:
                 synchronize_session=False)
             db.query(Report).filter(Report.id.in_(report_ids)).delete(
                 synchronize_session=False)
+        # attachments recréés au re-parsing (report supprimé d'abord → pas de FK)
+        db.query(Attachment).filter(Attachment.email_id == email_id).delete(
+            synchronize_session=False)
         db.commit()
 
 
