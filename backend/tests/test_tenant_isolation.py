@@ -23,6 +23,9 @@ def test_forged_insert_for_other_tenant_is_rejected(seed_two_tenants):
         db.add(Report(tenant_id=tid_b, email_id=email_a.id, source_type="body", status="ok"))
         with pytest.raises(Exception):
             db.flush()  # WITH CHECK doit rejeter l'écriture cross-tenant
+        # Après l'erreur attendue, la transaction est en échec : on la nettoie pour
+        # que le context manager puisse se refermer proprement.
+        db.rollback()
 
 
 def test_worker_sees_all_tenants(seed_two_tenants):
