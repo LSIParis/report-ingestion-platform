@@ -1,0 +1,159 @@
+# ============================================================================
+# Stack PORTAINER — images pré-construites depuis GHCR (aucun build sur l'hôte).
+#
+# Déploiement (mode Repository, comme portainer-stack.yml) :
+#   Repository URL : https://github.com/LSIParis/report-ingestion-platform
+#   Compose path   : infra/portainer-stack.ghcr.yml
+#
+# Prérequis :
+#  - Les images sont poussées par le workflow .github/workflows/build-images.yml
+#    (ghcr.io/lsiparis/report-api et report-frontend).
+#  - Rendre ces packages PUBLICS sur GitHub (Packages → chaque image → Package
+#    settings → Change visibility → Public), OU ajouter des identifiants de
+#    registre GHCR dans Portainer (Registries) pour un pull authentifié.
+#
+# Portainer clone le repo → les fichiers Caddyfile / init-roles.sql sont présents
+# pour les montages. Les images sont TIRÉES (pas construites) : déploiement rapide.
+# ============================================================================
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      FILES_DOMAIN: ${FILES_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, frontend, minio]
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reports
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-roles.sql:/docker-entrypoint-initdb.d/init-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb -p local/reports-raw;
+      exit 0;"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  migrate:
+    image: ghcr.io/lsiparis/report-api:latest
+    command: alembic upgrade head
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL_MIGRATE: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/reports
+
+  api:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+
+  worker:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: celery -A app.celery_app worker -l info --concurrency 4
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+  imap-worker:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: python -m app.workers.imap_worker
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      IMAP_HOST: ${IMAP_HOST}
+      IMAP_USER: ${IMAP_USER}
+      IMAP_PASSWORD: ${IMAP_PASSWORD}
+
+  frontend:
+    image: ghcr.io/lsiparis/report-frontend:latest
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:
+  redisdata:
+  caddy_data:
+  caddy_config:

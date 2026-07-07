@@ -56,28 +56,46 @@ construit les images et trouve les fichiers `Caddyfile` / `init-roles.sql` — r
 
 ---
 
-## Méthode B — Web editor (coller le compose)
+## Méthode B — Images pré-construites (GHCR), sans build sur l'hôte
 
-Utile sans dépôt connecté. Portainer ne peut pas construire depuis un contexte local en
-mode Web editor : il faut donc des **images pré-construites** poussées sur un registre
-(ex. GHCR). Étapes :
+Identique à la méthode A (mode **Repository**) mais Portainer **tire** les images au lieu de
+les construire → déploiement plus rapide et hôte moins sollicité.
 
-1. Construire et pousser les images une fois (depuis ta machine ou un runner) :
-   ```bash
-   docker build -t ghcr.io/lsiparis/report-api:latest ./backend
-   docker build -f ./frontend/Dockerfile.prod --build-arg VITE_API_URL=/api \
-     -t ghcr.io/lsiparis/report-frontend:latest ./frontend
-   docker push ghcr.io/lsiparis/report-api:latest
-   docker push ghcr.io/lsiparis/report-frontend:latest
-   ```
-2. Dans `portainer-stack.yml`, remplacer les blocs `image: report-platform-*:portainer` +
-   `build:` par les images GHCR ci-dessus (retirer les `build:`), et remplacer les
-   bind-mounts `./Caddyfile` / `./init-roles.sql` par des `configs:` inline (Portainer récent)
-   ou une image Caddy/Postgres personnalisée embarquant ces fichiers.
-3. Coller le compose modifié dans **Stacks → Add stack → Web editor**, définir les mêmes
-   variables, **Deploy**.
+### 1. Publier les images (automatique)
 
-> La méthode A évite tout ce travail : préfère-la sauf contrainte spécifique.
+Le workflow `.github/workflows/build-images.yml` construit et pousse à chaque `push` sur
+`main` :
+- `ghcr.io/lsiparis/report-api` (backend)
+- `ghcr.io/lsiparis/report-frontend` (frontend, build-arg `VITE_API_URL=/api`)
+
+Tags produits : `latest` (sur `main`), `sha-<court>`, et `vX.Y.Z` sur les tags Git.
+
+> Build manuel possible si besoin (runners indisponibles) :
+> ```bash
+> echo $CR_PAT | docker login ghcr.io -u <user> --password-stdin
+> docker build -t ghcr.io/lsiparis/report-api:latest ./backend && docker push ghcr.io/lsiparis/report-api:latest
+> docker build -f ./frontend/Dockerfile.prod --build-arg VITE_API_URL=/api \
+>   -t ghcr.io/lsiparis/report-frontend:latest ./frontend && docker push ghcr.io/lsiparis/report-frontend:latest
+> ```
+
+### 2. Rendre les images accessibles
+
+Après le premier push, les packages GHCR sont **privés**. Deux options :
+- **Public** (simple) : GitHub → *Packages* → chaque image → *Package settings* →
+  *Change visibility* → **Public**. Portainer tire sans identifiants.
+- **Privé** : Portainer → *Registries* → *Add registry* → *Custom* (`ghcr.io`) avec un
+  PAT `read:packages`. La stack pourra alors tirer les images privées.
+
+### 3. Déployer
+
+Comme la méthode A, mais **Compose path** : `infra/portainer-stack.ghcr.yml`
+(mêmes variables d'environnement). Portainer clone le repo (pour `Caddyfile` /
+`init-roles.sql`) et tire les images GHCR.
+
+> Le « pur » Web editor (coller le compose sans dépôt) n'est pas recommandé ici :
+> les fichiers `Caddyfile` et `init-roles.sql` devraient être inlinés, ce que
+> l'interpolation Compose complique (`{$DOMAIN}` de Caddy, `$$` du SQL). Le mode
+> Repository + images GHCR donne le même résultat sans ces pièges.
 
 ---
 
