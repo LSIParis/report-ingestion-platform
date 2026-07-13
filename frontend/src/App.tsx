@@ -10,6 +10,7 @@ import { Overview } from "./pages/Overview";
 import { Quarantine } from "./pages/Quarantine";
 import { ReportDetail } from "./pages/ReportDetail";
 import { ReportsList } from "./pages/ReportsList";
+import { Settings } from "./pages/Settings";
 
 const qc = new QueryClient();
 
@@ -31,6 +32,7 @@ export default function App() {
             <Route element={<Layout />}>
               <Route path="/quarantine" element={<Quarantine />} />
               <Route path="/admin/rules" element={<AdminRules />} />
+              <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>
         </Routes>

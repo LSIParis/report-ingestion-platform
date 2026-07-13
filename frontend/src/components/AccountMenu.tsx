@@ -133,6 +133,16 @@ export function AccountMenu() {
           </div>
 
           <div className="py-1">
+            {isAdmin && (
+              <MenuItem
+                onClick={() => {
+                  setOpen(false);
+                  nav("/settings");
+                }}
+              >
+                Paramètres — comptes
+              </MenuItem>
+            )}
             <MenuItem
               onClick={() => {
                 setOpen(false);
