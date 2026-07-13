@@ -14,8 +14,8 @@ peut pas, même par erreur de code, contourner l'isolation multitenant.
 import os
 import sys
 
-import psycopg2
 from psycopg2 import sql
+from sqlalchemy import create_engine
 
 from app.config import settings
 
@@ -26,9 +26,14 @@ ROLES = (
 
 
 def main() -> None:
-    conn = psycopg2.connect(settings.database_url_migrate)
-    conn.autocommit = True
-    with conn.cursor() as cur:
+    # On passe par SQLAlchemy (comme Alembic et le reste de l'app) plutôt que par
+    # psycopg2.connect(url) : libpq parse l'URL selon ses propres règles et casse dès
+    # que le mot de passe contient '/', '+' ou '@' (ex. un secret en base64), alors que
+    # SQLAlchemy décompose l'URL et passe les paramètres séparément.
+    conn = create_engine(settings.database_url_migrate).raw_connection()
+    pg = conn.driver_connection
+    pg.autocommit = True
+    with pg.cursor() as cur:
         for role, env_var, bypass in ROLES:
             password = os.environ.get(env_var)
             if not password:
