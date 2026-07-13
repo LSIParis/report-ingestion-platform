@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import jwt
 from fastapi import HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
@@ -27,16 +28,24 @@ class TenantMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith(self.PUBLIC_PATHS):
             return await call_next(request)
 
-        token = self._bearer(request)
+        # Une HTTPException levée DANS un BaseHTTPMiddleware n'est pas interceptée par
+        # les gestionnaires de FastAPI (ils vivent plus bas dans la pile) : elle
+        # ressortirait en 500. Le refus d'isolation doit être un 403 explicite, pas une
+        # erreur serveur — on convertit donc ici, à la frontière.
         try:
-            claims = jwt.decode(
-                token, settings.jwt_public_key, algorithms=["RS256"],
-                audience=settings.jwt_audience, issuer=settings.jwt_issuer,
-            )
-        except jwt.PyJWTError as exc:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"JWT invalide: {exc}")
+            token = self._bearer(request)
+            try:
+                claims = jwt.decode(
+                    token, settings.jwt_public_key, algorithms=["RS256"],
+                    audience=settings.jwt_audience, issuer=settings.jwt_issuer,
+                )
+            except jwt.PyJWTError as exc:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"JWT invalide: {exc}")
 
-        request.state.tenant = self._build_context(request, claims)
+            request.state.tenant = self._build_context(request, claims)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
         return await call_next(request)
 
     @staticmethod
