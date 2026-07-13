@@ -20,7 +20,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
     """Vérifie le JWT, en dérive le TenantContext, le pose sur request.state.
     Ne fait aucune requête DB — juste l'authZ."""
 
-    PUBLIC_PATHS = ("/health", "/auth/login", "/docs", "/openapi.json", "/redoc")
+    # /ingest/* : appelé par AWS SNS (pas de JWT) → sécurisé par signature SNS.
+    PUBLIC_PATHS = ("/health", "/auth/login", "/docs", "/openapi.json", "/redoc", "/ingest/")
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path.startswith(self.PUBLIC_PATHS):

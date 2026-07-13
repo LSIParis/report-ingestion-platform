@@ -1,0 +1,16 @@
+{
+  "profile_id": "acme_pdf",
+  "tenant_id": "acme",
+  "format": "pdf",
+  "detection": {
+    "text_patterns": {
+      "Total": "Total\\s*TTC\\s*:?\\s*([0-9., ]+)",
+      "Date": "Date\\s*:?\\s*([0-9/]{8,10})"
+    }
+  },
+  "field_mapping": {
+    "Date": { "target": "report_date", "type": "date", "format": "%d/%m/%Y" },
+    "Total": { "target": "amount", "type": "decimal", "decimal_sep": "," }
+  },
+  "validation": { "amount": { "min": 0 } }
+}

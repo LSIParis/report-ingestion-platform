@@ -122,6 +122,21 @@ service réelle — ce sont des valeurs de démonstration.
 4. Sous ~45 s (polling IMAP), le rapport apparaît dans le dashboard — **et uniquement**
    pour son tenant.
 
+## 8bis. Ingestion push via SES (optionnel, AWS)
+
+Alternative à l'IMAP polling pour un déploiement AWS. Endpoint : `POST /api/ingest/ses`
+(public, sécurisé par **signature SNS**, pas de JWT).
+
+1. **Règle de réception SES** sur le domaine : action **S3** (stocke le `.eml` brut dans
+   un bucket S3) **+** action **SNS** (publie une notification).
+2. **Abonnement SNS** de type HTTPS pointant sur `https://rapports.mondomaine.tld/api/ingest/ses`.
+   Le premier appel est une `SubscriptionConfirmation` : l'endpoint la confirme automatiquement.
+3. Config : utiliser **S3 AWS** (et non MinIO) — `S3_ENDPOINT` vide/AWS + credentials IAM
+   ayant accès au bucket d'inbound SES et au bucket `reports-raw`.
+
+Le handler lit le `.eml` depuis S3 et le passe au **même pipeline** que l'IMAP (dédup,
+résolution tenant, parsing…). On peut désactiver l'`imap-worker` dans ce mode.
+
 ## 9. Sauvegardes
 
 ```bash
