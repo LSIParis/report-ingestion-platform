@@ -4,6 +4,7 @@ import email
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.header import decode_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
 
@@ -14,6 +15,22 @@ from app.db.session import get_session
 from app.storage import ObjectStore
 
 log = structlog.get_logger()
+
+
+def decoded_header(msg: Message, name: str) -> str | None:
+    """En-tête décodé. Les en-têtes non-ASCII sont transportés en « encoded-words »
+    RFC 2047 (`=?utf-8?B?...?=`) : Microsoft encode ainsi TOUS ses sujets de rapport
+    DMARC. Sans décodage, le sujet stocké est du base64 — la résolution de tenant (qui
+    lit le domaine dans le sujet) n'y trouve rien et tout part en quarantaine."""
+    val = msg.get(name)
+    if not val:
+        return None
+    parts = [
+        chunk.decode(charset or "utf-8", errors="replace")
+        if isinstance(chunk, bytes) else chunk
+        for chunk, charset in decode_header(str(val))
+    ]
+    return "".join(parts).strip()
 
 
 @dataclass(frozen=True)
@@ -82,8 +99,7 @@ class IngestionService:
 
     @staticmethod
     def _header(msg: Message, name: str) -> str | None:
-        val = msg.get(name)
-        return str(val).strip() if val else None
+        return decoded_header(msg, name)
 
     @classmethod
     def _extract_message_id(cls, msg: Message, raw: bytes) -> str | None:
