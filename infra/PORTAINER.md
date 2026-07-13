@@ -99,6 +99,53 @@ Comme la méthode A, mais **Compose path** : `infra/portainer-stack.ghcr.yml`
 
 ---
 
+## Méthode C — Derrière un reverse-proxy existant (Nginx Proxy Manager)
+
+À utiliser quand l'hôte a **déjà** un proxy sur 80/443 (NPM, Traefik…). C'est le cas de
+la prod actuelle. Compose path : `infra/portainer-stack.npm.yml`.
+
+La stack ne publie **aucun port**. Seuls `frontend` et `minio` rejoignent le réseau
+externe du proxy (par défaut `proxy`), sous les alias `reports-frontend` et
+`reports-minio`. Postgres, Redis, ClamAV et les workers restent sur un réseau privé.
+
+### Deux pièges spécifiques aux endpoints **agent** (hôte Docker distant)
+
+1. **Aucun bind-mount de fichier du dépôt ne fonctionne.** Portainer clone le dépôt sur
+   *son* serveur, pas sur l'hôte cible : Docker crée un répertoire vide à la place du
+   fichier. C'est pourquoi les rôles DB sont créés par `scripts/ensure_roles.py` depuis
+   le conteneur `migrate`, et non par un `init-roles.sql` monté.
+2. **Aucune variable ne peut être multiligne.** Portainer les écrit dans un `stack.env`
+   (une ligne par variable) : un PEM y casse le parsing. D'où `JWT_*_KEY_B64`.
+
+### Les deux Proxy Hosts à créer dans NPM
+
+| | Application | Fichiers (URLs signées) |
+|---|---|---|
+| **Domain Names** | `DOMAIN` | `FILES_DOMAIN` |
+| **Scheme** | `http` | `http` |
+| **Forward Hostname** | `reports-frontend` | `reports-minio` |
+| **Forward Port** | `80` | `9000` |
+| **SSL** | Request a new certificate + Force SSL | idem |
+
+Le nginx du frontend route lui-même `/api/*` vers l'API (préfixe retiré) : NPM n'a qu'un
+seul upstream par domaine, aucun routage par chemin à configurer.
+
+> ⚠️ **Ne pas activer le proxy Cloudflare (nuage orange)** sur `FILES_DOMAIN` : MinIO
+> signe ses URLs avec le *Host*, et toute réécriture invalide la signature SigV4. NPM,
+> lui, conserve le Host par défaut.
+
+### Provisionnement
+
+```bash
+# Console du conteneur api (Portainer → conteneur api → Console → /bin/sh)
+python -m scripts.add_tenant exemple.com "Exemple SA"     # + règle subject_regex DMARC
+USER_PASSWORD=... python -m scripts.add_user a@b.tld tenant_viewer exemple.com
+python -m scripts.requeue needs_review                    # rejoue la quarantaine
+python -m scripts.reingest needs_review                   # re-lit les .eml depuis S3
+```
+
+---
+
 ## Après déploiement
 
 - Amorcer les données : Portainer → conteneur `api` → **Console** (`/bin/sh`) →
