@@ -34,8 +34,12 @@ services:
       - ./init-roles.sql:/docker-entrypoint-initdb.d/init-roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      retries: 5
+      interval: 5s
+      retries: 12
+      # Le 1er démarrage fait initdb PUIS joue init-roles.sql : sans start_period,
+      # Compose déclare le conteneur unhealthy avant la fin de l'initialisation et
+      # abandonne le déploiement des services qui en dépendent.
+      start_period: 90s
 
   minio:
     image: minio/minio
@@ -52,8 +56,9 @@ services:
       - miniodata:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      retries: 5
+      interval: 5s
+      retries: 12
+      start_period: 30s
 
   createbuckets:
     image: minio/mc
