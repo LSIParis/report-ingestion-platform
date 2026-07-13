@@ -1,6 +1,8 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
 
+import { useMe } from "../api/account";
 import { isAdmin } from "../auth/session";
+import { useTenant } from "../auth/tenant";
 import { AccountMenu } from "./AccountMenu";
 
 export function Layout() {
@@ -21,9 +23,12 @@ export function Layout() {
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* La barre porte le compte : sa place est en haut à droite, pas noyée en bas
-            de la navigation à côté des liens de contenu. */}
-        <header className="flex h-14 shrink-0 items-center justify-end border-b bg-white px-6">
+        {/* La barre porte le compte à droite, et à gauche le domaine réellement affiché.
+            Sans cette mention, rien à l'écran ne dit de quel client on regarde les
+            chiffres — c'est ce qui rendait un changement de domaine sans effet
+            impossible à repérer. */}
+        <header className="flex h-14 shrink-0 items-center justify-between border-b bg-white px-6">
+          <CurrentTenant />
           <AccountMenu />
         </header>
         <main className="min-w-0 flex-1">
@@ -31,6 +36,33 @@ export function Layout() {
         </main>
       </div>
     </div>
+  );
+}
+
+function CurrentTenant() {
+  const { tenant } = useTenant();
+  const me = useMe();
+  const domain = me.data?.tenants.find((t) => t.id === tenant)?.domain;
+  const admin = me.data?.role === "platform_admin";
+
+  if (!me.data) return <span />;
+
+  if (!tenant) {
+    return admin ? (
+      <span className="flex items-center gap-2 text-sm">
+        <span className="rounded bg-gray-900 px-1.5 py-0.5 text-xs text-white">Vue globale</span>
+        <span className="text-gray-500">tous les domaines confondus</span>
+      </span>
+    ) : (
+      <span className="text-sm text-amber-700">Aucun domaine sélectionné</span>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-2 text-sm">
+      <span className="text-xs uppercase tracking-wide text-gray-400">Domaine</span>
+      <span className="font-medium">{domain ?? "…"}</span>
+    </span>
   );
 }
 

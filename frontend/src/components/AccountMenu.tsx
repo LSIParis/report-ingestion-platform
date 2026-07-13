@@ -1,16 +1,16 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useMe } from "../api/account";
-import { clearSession, getActiveTenant } from "../auth/session";
+import { clearSession } from "../auth/session";
+import { useTenant } from "../auth/tenant";
 import { PasswordDialog } from "./PasswordDialog";
 
 const MIN_PASSWORD = 12;
 
 export function AccountMenu() {
   const nav = useNavigate();
-  const qc = useQueryClient();
+  const { tenant: active, setTenant } = useTenant();
   const me = useMe();
   const [open, setOpen] = useState(false);
   const [pwOpen, setPwOpen] = useState(false);
@@ -32,25 +32,22 @@ export function AccountMenu() {
     };
   }, [open]);
 
-  const active = getActiveTenant();
   const tenants = me.data?.tenants ?? [];
   const current = tenants.find((t) => t.id === active);
   const isAdmin = me.data?.role === "platform_admin";
 
   function switchTenant(id: string | null) {
-    // id === null : administrateur repassant en vue globale (aucun X-Tenant-Id envoyé,
-    // le serveur bascule alors en accès transverse).
-    if (id) localStorage.setItem("active_tenant", id);
-    else localStorage.removeItem("active_tenant");
-    // Toutes les données en cache appartiennent à l'ancien domaine : on les jette
-    // plutôt que de les afficher une fraction de seconde sous le nouveau nom.
-    qc.clear();
+    // id === null : administrateur repassant en vue transverse (aucun X-Tenant-Id
+    // envoyé, le serveur bascule alors en accès global).
+    // setTenant remonte tout l'arbre de requêtes avec un QueryClient neuf (App.tsx) :
+    // aucune donnée du domaine précédent ne peut rester à l'écran.
+    setTenant(id);
     setOpen(false);
   }
 
   function logout() {
     clearSession();
-    qc.clear();
+    setTenant(null);
     nav("/login");
   }
 

@@ -3,9 +3,11 @@ import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { getClaims, setSession } from "../auth/session";
+import { useTenant } from "../auth/tenant";
 
 export function Login() {
   const nav = useNavigate();
+  const { setTenant } = useTenant();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -21,10 +23,11 @@ export function Login() {
       });
       setSession(res.access_token);
       const claims = getClaims();
-      // mono-tenant : fixe le tenant actif automatiquement
-      if (claims && claims.tenant_ids.length === 1) {
-        localStorage.setItem("active_tenant", claims.tenant_ids[0]);
-      }
+      // Un seul domaine rattaché : il n'y a rien à choisir, on le fixe. Sinon on laisse
+      // à null — l'admin obtient la vue transverse, le lecteur multi-domaines devra
+      // choisir (l'API refuse un choix ambigu). On passe par le contexte, pas par
+      // localStorage : sinon l'état React et le stockage divergent dès la connexion.
+      setTenant(claims && claims.tenant_ids.length === 1 ? claims.tenant_ids[0] : null);
       nav("/");
     } catch {
       setError("Identifiants invalides");
