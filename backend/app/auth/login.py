@@ -2,16 +2,15 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import APIRouter, HTTPException, status
-from passlib.context import CryptContext
 from pydantic import BaseModel
 
+from app.auth.passwords import verify_password
 from app.config import settings
 from app.db.models import AppUser, UserTenant
 from app.db.session import get_session
 from app.services.audit import audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class LoginIn(BaseModel):
@@ -29,7 +28,7 @@ class TokenOut(BaseModel):
 def login(body: LoginIn):
     with get_session() as db:
         user = db.query(AppUser).filter_by(email=body.email.lower()).first()
-        if not user or not pwd.verify(body.password, user.password_hash):
+        if not user or not verify_password(body.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Identifiants invalides")
         tenant_ids = [
             str(t) for (t,) in db.query(UserTenant.tenant_id).filter_by(user_id=user.id).all()

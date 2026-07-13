@@ -12,13 +12,12 @@ import os
 import secrets
 import sys
 
-from passlib.context import CryptContext
 from sqlalchemy import select
 
+from app.auth.passwords import hash_password
 from app.db.models import AppUser, Tenant, UserTenant
 from app.db.session import get_session
 
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ROLES = ("platform_admin", "tenant_viewer")
 
 
@@ -35,10 +34,10 @@ def run(email: str, role: str, domains: list[str]) -> None:
         user = db.execute(select(AppUser).filter_by(email=email)).scalar_one_or_none()
         if user:
             user.role = role
-            user.password_hash = pwd.hash(password)
+            user.password_hash = hash_password(password)
             print(f"compte mis à jour : {email}")
         else:
-            user = AppUser(email=email, role=role, password_hash=pwd.hash(password))
+            user = AppUser(email=email, role=role, password_hash=hash_password(password))
             db.add(user)
             db.flush()
             print(f"compte créé : {email} ({role})")

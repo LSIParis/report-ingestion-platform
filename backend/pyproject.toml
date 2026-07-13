@@ -11,7 +11,9 @@ dependencies = [
   "pydantic-settings==2.7.1",
   "python-multipart==0.0.20",
   "pyjwt[crypto]==2.10.1",
-  "passlib[bcrypt]==1.7.4",
+  # bcrypt en direct : passlib 1.7.4 (2020, non maintenu) casse avec bcrypt >= 4.1
+  # et rend tout hachage impossible. Voir app/auth/passwords.py.
+  "bcrypt==4.2.1",
   # DB
   "sqlalchemy==2.0.36",
   "psycopg2-binary==2.9.10",
