@@ -31,6 +31,8 @@ dependencies = [
   "chardet==5.2.0",
   "beautifulsoup4==4.12.3",
   "pdfplumber==0.11.4",
+  # XML DMARC : parsing durci (XXE, billion laughs) — le contenu vient d'Internet
+  "defusedxml==0.7.1",
   # Observabilité
   "structlog==24.4.0",
   "sentry-sdk==2.19.2",

@@ -1,0 +1,28 @@
+{
+  "profile_id": "_default_dmarc_xml",
+  "tenant_id": "*",
+  "format": "dmarc_xml",
+  "detection": {},
+  "field_mapping": {
+    "date_begin":    { "target": "report_date",    "type": "date", "format": "%Y-%m-%d", "required": true },
+    "date_end":      { "target": "period_end",     "type": "date", "format": "%Y-%m-%d" },
+    "org_name":      { "target": "reporter",       "type": "string", "required": true },
+    "report_id":     { "target": "report_id",      "type": "string", "required": true },
+    "policy_domain": { "target": "policy_domain",  "type": "string", "required": true },
+    "policy_p":      { "target": "policy",         "type": "string" },
+    "policy_pct":    { "target": "policy_pct",     "type": "int" },
+    "source_ip":     { "target": "source_ip",      "type": "string", "required": true },
+    "count":         { "target": "message_count",  "type": "int", "required": true },
+    "disposition":   { "target": "disposition",    "type": "string" },
+    "dkim_result":   { "target": "dkim",           "type": "string" },
+    "spf_result":    { "target": "spf",            "type": "string" },
+    "aligned":       { "target": "aligned",        "type": "string" },
+    "header_from":   { "target": "header_from",    "type": "string" },
+    "envelope_from": { "target": "envelope_from",  "type": "string" },
+    "auth_dkim":     { "target": "auth_dkim",      "type": "string" },
+    "auth_spf":      { "target": "auth_spf",       "type": "string" }
+  },
+  "validation": {
+    "message_count": { "min": 0 }
+  }
+}

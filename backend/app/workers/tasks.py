@@ -7,11 +7,12 @@ import structlog
 
 from app.celery_app import celery
 from app.config import settings
-from app.db.models import Attachment, Email, ParsingError, Report, ReportRow
+from app.db.models import Attachment, Email, ParsingError, Report, ReportRow, Tenant
 from app.db.session import get_session
 from app.normalization.normalizer import NormalizationService
 from app.normalization.profiles import load_profile, select_profile
 from app.parsing.base import ParseResult
+from app.parsing.guards import guard_report_domain
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
 from app.services import antivirus
@@ -26,7 +27,12 @@ import app.parsing.adapters  # noqa: F401
 log = structlog.get_logger()
 store = ObjectStore.from_settings(settings)
 
-EXT_TO_FORMAT = {".csv": "csv", ".xlsx": "xlsx", ".xls": "xlsx", ".pdf": "pdf"}
+EXT_TO_FORMAT = {
+    ".csv": "csv", ".xlsx": "xlsx", ".xls": "xlsx", ".pdf": "pdf",
+    # Rapports agrégés DMARC : XML normalisé, livré compressé (.gz chez Google/Yahoo,
+    # .zip chez Microsoft) ou nu. Le contenu réel est vérifié par nombre magique.
+    ".gz": "dmarc_xml", ".zip": "dmarc_xml", ".xml": "dmarc_xml",
+}
 
 
 class TransientError(Exception):
@@ -85,6 +91,7 @@ def _process_source(email_id: str, tenant_id: str, source: dict) -> str:
         raw = store.get_default(source["object_key"])
         profile = load_profile(profile_id)
         parsed = get_adapter(source["fmt"]).parse(raw, profile)
+        parsed = guard_report_domain(parsed, _tenant_domain(tenant_id))
         normalized = NormalizationService().normalize(parsed, profile)
     except FileNotFoundError:
         normalized = ParseResult(status="failed",
@@ -102,6 +109,12 @@ def _process_source(email_id: str, tenant_id: str, source: dict) -> str:
         profile_id=profile_id, source_type=source["type"], result=normalized,
     )
     return normalized.status
+
+
+def _tenant_domain(tenant_id: str) -> str | None:
+    with get_session() as db:
+        t = db.get(Tenant, tenant_id)
+        return t.domain if t else None
 
 
 def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
