@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 from app.api.pagination import Page
 from app.api.schemas import EmailOut, ReportOut, ReportRowOut
@@ -42,11 +42,14 @@ def test_page_generique_convertit_les_objets_orm():
     assert dumped["items"][0]["status"] == "parsed_ok"
 
 
-def test_page_non_parametree_refuse_un_objet_orm():
-    # Garde-fou : si quelqu'un remet un Page nu sur une route, ça doit casser au test,
-    # pas en production.
-    with pytest.raises(ValidationError):
-        Page.model_validate({"items": [_report()], "total": 1, "page": 1, "size": 50})
+def test_page_non_parametree_casse_a_la_serialisation():
+    """Garde-fou reproduisant le bug de production : un `Page` NON paramétré valide
+    sans broncher (le TypeVar non lié vaut Any) et n'explose qu'au moment de
+    sérialiser — d'où le 500 à la réponse et non à l'entrée. Si quelqu'un remet un
+    `response_model=Page` nu sur une route, ce test le rattrape."""
+    page = Page.model_validate({"items": [_report()], "total": 1, "page": 1, "size": 50})
+    with pytest.raises(PydanticSerializationError):
+        page.model_dump(mode="json")
 
 
 def test_email_et_row_serialisables():
