@@ -1,14 +1,18 @@
+import re
 from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func
 
 from app.auth.deps import get_tenant_ctx, require_role
 from app.auth.passwords import hash_password
-from app.db.models import AppUser, Tenant, TenantMatchingRule, UserTenant
+from app.db.models import AppUser, Email, Report, Tenant, TenantMatchingRule, UserTenant
 from app.db.session import tenant_scoped_session
 from app.services.audit import audit
+from app.services.tenants import ensure_tenant, set_tenant_active
+from app.workers.tasks import reprocess_report
 
 router = APIRouter(prefix="/admin", tags=["admin"],
                    dependencies=[Depends(require_role("platform_admin"))])
@@ -16,12 +20,141 @@ router = APIRouter(prefix="/admin", tags=["admin"],
 ROLES = ("platform_admin", "tenant_viewer")
 
 
-# ----------------------------------------------------------------- tenants & règles
+# --------------------------------------------------------------- domaines surveillés
+class TenantIn(BaseModel):
+    domain: str
+    name: str | None = None
+
+    @field_validator("domain")
+    @classmethod
+    def _domain(cls, v: str) -> str:
+        v = v.strip().lower().rstrip(".")
+        if v.startswith("@"):            # confusion fréquente : on saisit une adresse
+            v = v[1:]
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+", v):
+            raise ValueError("nom de domaine invalide (attendu : exemple.com)")
+        return v
+
+
+class TenantPatch(BaseModel):
+    name: str | None = None
+    active: bool | None = None
+
+
 @router.get("/tenants")
 def list_tenants():
+    """Domaines surveillés, avec ce qu'ils ont réellement collecté.
+
+    Le volume et la date du dernier rapport sont ce qui permet de repérer un domaine
+    silencieux — le symptôme d'un enregistrement DMARC mal publié.
+    """
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:
-        return [{"id": str(t.id), "domain": t.domain, "name": t.name}
-                for t in db.query(Tenant).order_by(Tenant.name).all()]
+        stats = dict(
+            (tid, (n, last)) for tid, n, last in
+            db.query(Report.tenant_id, func.count(Report.id), func.max(Report.created_at))
+              .group_by(Report.tenant_id).all()
+        )
+        rules = dict(
+            db.query(TenantMatchingRule.tenant_id, func.count())
+              .filter_by(is_active=True).group_by(TenantMatchingRule.tenant_id).all()
+        )
+        out = []
+        for t in db.query(Tenant).order_by(Tenant.domain).all():
+            reports, last = stats.get(t.id, (0, None))
+            out.append({
+                "id": str(t.id), "domain": t.domain, "name": t.name,
+                "status": t.status,
+                "reports": reports,
+                "last_report_at": last.isoformat() if last else None,
+                "active_rules": rules.get(t.id, 0),
+                "created_at": t.created_at.isoformat(),
+            })
+        return out
+
+
+@router.post("/tenants", status_code=status.HTTP_201_CREATED)
+def create_tenant(body: TenantIn, ctx=Depends(get_tenant_ctx)):
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        if db.query(Tenant).filter_by(domain=body.domain).first():
+            raise HTTPException(status.HTTP_409_CONFLICT, "Ce domaine est déjà surveillé")
+        tenant, _ = ensure_tenant(db, body.domain, body.name)
+        out = {"id": str(tenant.id), "domain": tenant.domain, "name": tenant.name}
+        db.commit()
+
+    audit(actor=ctx.user, action="tenant.created", target_id=out["id"],
+          metadata={"domain": out["domain"]})
+    return out
+
+
+@router.patch("/tenants/{tenant_id}")
+def update_tenant(tenant_id: str, body: TenantPatch, ctx=Depends(get_tenant_ctx)):
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        if body.name is not None:
+            tenant.name = body.name.strip() or tenant.domain
+        if body.active is not None:
+            set_tenant_active(db, tenant, body.active)
+        out = {"id": str(tenant.id), "domain": tenant.domain,
+               "name": tenant.name, "status": tenant.status}
+        db.commit()
+
+    audit(actor=ctx.user, action="tenant.updated", target_id=tenant_id, metadata=out)
+    return out
+
+
+@router.delete("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tenant(tenant_id: str, ctx=Depends(get_tenant_ctx)):
+    """Suppression définitive — uniquement si le domaine n'a jamais rien collecté.
+
+    Dès qu'un e-mail lui est rattaché, le supprimer effacerait l'historique du client
+    (rapports, lignes, pièces jointes) : on refuse, et on oriente vers la suspension,
+    qui coupe la collecte sans rien détruire.
+    """
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+
+        emails = db.query(func.count()).select_from(Email).filter(
+            Email.tenant_id == tenant.id).scalar()
+        if emails:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Ce domaine a déjà collecté {emails} e-mail(s). Suspendez-le plutôt "
+                "que de le supprimer : la suppression effacerait tout son historique.")
+        if db.query(func.count()).select_from(UserTenant).filter(
+                UserTenant.tenant_id == tenant.id).scalar():
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "Des comptes sont rattachés à ce domaine.")
+
+        domain = tenant.domain
+        db.query(TenantMatchingRule).filter_by(tenant_id=tenant.id).delete()
+        db.delete(tenant)
+        db.commit()
+
+    audit(actor=ctx.user, action="tenant.deleted", target_id=tenant_id,
+          metadata={"domain": domain})
+
+
+@router.post("/quarantine/requeue", status_code=status.HTTP_202_ACCEPTED)
+def requeue_quarantine(ctx=Depends(get_tenant_ctx)):
+    """Rejoue les e-mails restés sans domaine attribué.
+
+    Cas courant : le client publie son DMARC avant que le domaine n'existe ici. Ses
+    rapports s'accumulent en quarantaine, invisibles de tous — la plateforme refuse de
+    deviner. Une fois le domaine créé, ce bouton les rattache.
+    """
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        ids = [str(e.id) for e in db.query(Email.id)
+               .filter(Email.status == "needs_review").all()]
+
+    for email_id in ids:
+        reprocess_report.delay(email_id)
+
+    audit(actor=ctx.user, action="quarantine.requeued", metadata={"count": len(ids)})
+    return {"requeued": len(ids)}
 
 
 @router.get("/tenants/{tenant_id}/matching-rules")

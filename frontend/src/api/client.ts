@@ -19,6 +19,17 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     window.location.href = "/login";
     throw new ApiError(401, "unauthorized");
   }
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  if (!res.ok) {
+    // FastAPI renvoie {"detail": "..."} : on extrait le message, sinon les écrans
+    // afficheraient le JSON brut à l'utilisateur.
+    const body = await res.text();
+    let detail = body;
+    try {
+      detail = JSON.parse(body).detail ?? body;
+    } catch {
+      /* réponse non JSON : on garde le texte tel quel */
+    }
+    throw new ApiError(res.status, detail);
+  }
   return res.status === 204 ? (undefined as T) : res.json();
 }

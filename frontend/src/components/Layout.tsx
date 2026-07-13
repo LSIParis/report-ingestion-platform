@@ -17,6 +17,7 @@ export function Layout() {
           <NavLink to="/reports">Rapports</NavLink>
           <NavLink to="/metrics">Métriques</NavLink>
           {admin && <NavLink to="/quarantine">Quarantaine</NavLink>}
+          {admin && <NavLink to="/admin/domains">Domaines</NavLink>}
           {admin && <NavLink to="/admin/rules">Règles</NavLink>}
           {admin && <NavLink to="/settings">Paramètres</NavLink>}
         </div>
