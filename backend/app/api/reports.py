@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.pagination import Page, page_params, paginate
-from app.api.schemas import ParsingErrorOut, ReportOut
+from app.api.schemas import ParsingErrorOut, ReportOut, ReportRowOut
 from app.auth.deps import get_db, get_tenant_ctx
 from app.config import settings
 from app.db.models import Attachment, Email, ParsingError, Report, ReportRow
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 store = ObjectStore.from_settings(settings)
 
 
-@router.get("", response_model=Page)
+@router.get("", response_model=Page[ReportOut])
 def list_reports(status_f: str | None = None, brand: str | None = None,
                  db=Depends(get_db), pg=Depends(page_params)):
     q = db.query(Report)
@@ -33,7 +33,7 @@ def get_report(report_id: str, db=Depends(get_db)):
     return r
 
 
-@router.get("/{report_id}/rows", response_model=Page)
+@router.get("/{report_id}/rows", response_model=Page[ReportRowOut])
 def get_report_rows(report_id: str, db=Depends(get_db), pg=Depends(page_params)):
     q = db.query(ReportRow).filter(ReportRow.report_id == report_id)
     return paginate(q.order_by(ReportRow.report_date), *pg)

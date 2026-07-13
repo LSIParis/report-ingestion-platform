@@ -11,7 +11,7 @@ from app.workers.tasks import process_email
 router = APIRouter(prefix="/emails", tags=["emails"])
 
 
-@router.get("", response_model=Page)
+@router.get("", response_model=Page[EmailOut])
 def list_emails(status_f: str | None = None, db=Depends(get_db), pg=Depends(page_params)):
     q = db.query(Email)
     if status_f:
@@ -19,7 +19,7 @@ def list_emails(status_f: str | None = None, db=Depends(get_db), pg=Depends(page
     return paginate(q.order_by(Email.received_at.desc()), *pg)
 
 
-@router.get("/queue/quarantine", response_model=Page,
+@router.get("/queue/quarantine", response_model=Page[EmailOut],
             dependencies=[Depends(require_role("platform_admin"))])
 def list_quarantine(pg=Depends(page_params)):
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:

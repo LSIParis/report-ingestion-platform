@@ -1,11 +1,19 @@
 from datetime import date, datetime
+from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+# Les colonnes d'identité sont des UUID en base. Pydantic v2 ne coerce PAS un UUID vers
+# `str` : un champ déclaré `id: str` lève une erreur de validation à la sérialisation.
+# On les type donc en UUID — le rendu JSON reste une chaîne, le front ne voit aucune
+# différence.
 
 
 class ReportOut(BaseModel):
-    id: str
-    email_id: str
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    email_id: UUID
     source_type: str
     status: str
     profile_id: str | None
@@ -13,42 +21,36 @@ class ReportOut(BaseModel):
     parsed_at: datetime | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class ReportRowOut(BaseModel):
-    id: str
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
     report_date: date | None
     data: dict
 
-    class Config:
-        from_attributes = True
-
 
 class ParsingErrorOut(BaseModel):
-    id: str
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
     severity: str
     code: str
     message: str
     context: dict | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class EmailOut(BaseModel):
-    id: str
-    tenant_id: str | None
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID | None
     from_address: str
     subject: str
     status: str
     resolved_by: str | None
     received_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class AssignTenantIn(BaseModel):
