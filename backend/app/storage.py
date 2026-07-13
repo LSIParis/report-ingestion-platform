@@ -23,6 +23,7 @@ class ObjectStore:
         self._c = client
         self._default_bucket = default_bucket
         self._presign = presign_client or client
+        self._bucket_checked = False
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "ObjectStore":
@@ -45,12 +46,16 @@ class ObjectStore:
                 region_name=settings.s3_region,
                 config=_S3_CONFIG,
             )
-        store = cls(client, settings.s3_bucket, presign_client)
-        store._ensure_bucket(settings.s3_bucket)
-        return store
+        # Aucune I/O ici : construire un ObjectStore doit rester gratuit.
+        # `from_settings` est appelé au niveau MODULE par tasks.py et les routers ; un
+        # appel réseau à cet endroit ferait échouer le simple import du code dès que
+        # l'object store n'est pas joignable — en test, en CI, ou pendant un
+        # redémarrage de MinIO.
+        return cls(client, settings.s3_bucket, presign_client)
 
     # ---- écriture ----
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+        self._ensure_bucket_once()
         self._c.put_object(Bucket=self._default_bucket, Key=key, Body=data,
                            ContentType=content_type)
 
@@ -69,11 +74,15 @@ class ObjectStore:
             ExpiresIn=expires_s,
         )
 
-    def _ensure_bucket(self, bucket: str) -> None:
+    def _ensure_bucket_once(self) -> None:
+        """Vérifie le bucket à la PREMIÈRE écriture, pas à la construction."""
+        if self._bucket_checked:
+            return
         try:
-            self._c.head_bucket(Bucket=bucket)
+            self._c.head_bucket(Bucket=self._default_bucket)
         except ClientError:
             try:
-                self._c.create_bucket(Bucket=bucket)
+                self._c.create_bucket(Bucket=self._default_bucket)
             except ClientError:
                 pass  # course avec le service createbuckets : idempotent
+        self._bucket_checked = True
