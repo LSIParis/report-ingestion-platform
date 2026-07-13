@@ -31,12 +31,14 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init-roles.sql:/docker-entrypoint-initdb.d/init-roles.sql:ro
+      # PAS de bind-mount de init-roles.sql ici : sur un endpoint AGENT, le dépôt cloné
+      # vit sur le serveur Portainer, pas sur l'hôte Docker → Docker créerait un
+      # répertoire vide. Les rôles sont créés par `migrate` (scripts/ensure_roles.py).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       retries: 12
-      # Le 1er démarrage fait initdb PUIS joue init-roles.sql : sans start_period,
+      # initdb prend plusieurs dizaines de secondes au 1er démarrage : sans start_period,
       # Compose déclare le conteneur unhealthy avant la fin de l'initialisation et
       # abandonne le déploiement des services qui en dépendent.
       start_period: 90s
@@ -97,12 +99,16 @@ services:
 
   migrate:
     image: ghcr.io/lsiparis/report-api:latest
-    command: alembic upgrade head
+    # 1) rôles de connexion (app_api NOBYPASSRLS, app_worker BYPASSRLS)
+    # 2) schéma + RLS. Les deux sont idempotents et rejoués à chaque déploiement.
+    command: sh -c "python -m scripts.ensure_roles && alembic upgrade head"
     networks: [internal]
     depends_on:
       postgres: { condition: service_healthy }
     environment:
       DATABASE_URL_MIGRATE: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/reports
+      APP_API_PASSWORD: ${APP_API_PASSWORD}
+      APP_WORKER_PASSWORD: ${APP_WORKER_PASSWORD}
 
   api:
     image: ghcr.io/lsiparis/report-api:latest
@@ -114,8 +120,8 @@ services:
       redis: { condition: service_healthy }
       minio: { condition: service_healthy }
     environment:
-      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
-      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      DATABASE_URL_API: postgresql://app_api:${APP_API_PASSWORD}@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:${APP_WORKER_PASSWORD}@postgres:5432/reports
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
@@ -139,8 +145,8 @@ services:
       minio: { condition: service_healthy }
       clamav: { condition: service_started }
     environment:
-      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
-      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      DATABASE_URL_API: postgresql://app_api:${APP_API_PASSWORD}@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:${APP_WORKER_PASSWORD}@postgres:5432/reports
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
@@ -160,8 +166,8 @@ services:
       migrate: { condition: service_completed_successfully }
       minio: { condition: service_healthy }
     environment:
-      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
-      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      DATABASE_URL_API: postgresql://app_api:${APP_API_PASSWORD}@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:${APP_WORKER_PASSWORD}@postgres:5432/reports
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: reports-raw
