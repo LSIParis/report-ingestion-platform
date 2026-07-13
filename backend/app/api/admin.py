@@ -11,7 +11,10 @@ from app.auth.passwords import hash_password
 from app.db.models import AppUser, Email, Report, Tenant, TenantMatchingRule, UserTenant
 from app.db.session import tenant_scoped_session
 from app.services.audit import audit
+from app.services.rules import RuleError
+from app.services.rules import validate as validate_rule
 from app.services.tenants import ensure_tenant, set_tenant_active
+from app.tenant_resolver.resolver import TenantResolverService
 from app.workers.tasks import reprocess_report
 
 router = APIRouter(prefix="/admin", tags=["admin"],
@@ -157,23 +160,120 @@ def requeue_quarantine(ctx=Depends(get_tenant_ctx)):
     return {"requeued": len(ids)}
 
 
-@router.get("/tenants/{tenant_id}/matching-rules")
-def list_rules(tenant_id: str):
-    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
-        return [{"id": str(r.id), "tenant_id": str(r.tenant_id), "rule_type": r.rule_type,
-                 "pattern": r.pattern, "priority": r.priority, "is_active": r.is_active}
-                for r in db.query(TenantMatchingRule).filter_by(tenant_id=tenant_id)
-                           .order_by(TenantMatchingRule.priority).all()]
+# ------------------------------------------------------- règles de résolution
+# La cascade évalue les types dans CET ordre, et s'arrête au premier qui matche.
+# L'ordre n'est pas cosmétique : une règle `sender` court-circuite toutes les autres.
+CASCADE = {"sender": 0, "subject_regex": 1, "keyword": 2, "alias": 3}
 
 
-@router.post("/tenants/{tenant_id}/matching-rules", status_code=201)
-def add_rule(tenant_id: str, rule_type: str, pattern: str, priority: int = 100):
+class RuleIn(BaseModel):
+    tenant_id: UUID
+    rule_type: str
+    pattern: str
+    priority: int = Field(default=100, ge=1, le=1000)
+
+
+class RulePatch(BaseModel):
+    is_active: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=1000)
+
+
+class RuleTestIn(BaseModel):
+    subject: str = ""
+    from_address: str = ""
+
+
+@router.get("/rules")
+def list_rules():
+    """Toutes les règles, dans l'ORDRE D'ÉVALUATION réel.
+
+    On ne les liste pas par domaine : l'effet d'une règle dépend de toutes les autres
+    (la cascade s'arrête au premier match). Une règle vue isolément ne dit rien de ce
+    qu'elle fait réellement.
+    """
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:
-        r = TenantMatchingRule(tenant_id=tenant_id, rule_type=rule_type,
-                               pattern=pattern, priority=priority, is_active=True)
+        rows = (db.query(TenantMatchingRule, Tenant.domain)
+                  .join(Tenant, Tenant.id == TenantMatchingRule.tenant_id).all())
+        out = [{"id": str(r.id), "tenant_id": str(r.tenant_id), "domain": d,
+                "rule_type": r.rule_type, "pattern": r.pattern,
+                "priority": r.priority, "is_active": r.is_active}
+               for r, d in rows]
+    return sorted(out, key=lambda r: (CASCADE.get(r["rule_type"], 9), r["priority"],
+                                      r["domain"]))
+
+
+@router.post("/rules", status_code=status.HTTP_201_CREATED)
+def add_rule(body: RuleIn, ctx=Depends(get_tenant_ctx)):
+    try:
+        pattern = validate_rule(body.rule_type, body.pattern)
+    except RuleError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        if not db.get(Tenant, body.tenant_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        r = TenantMatchingRule(tenant_id=body.tenant_id, rule_type=body.rule_type,
+                               pattern=pattern, priority=body.priority, is_active=True)
         db.add(r)
+        db.flush()
+        out = {"id": str(r.id)}
         db.commit()
-        return {"id": str(r.id)}
+
+    audit(actor=ctx.user, action="rule.created", target_id=out["id"],
+          metadata={"type": body.rule_type, "pattern": pattern})
+    return out
+
+
+@router.patch("/rules/{rule_id}")
+def update_rule(rule_id: str, body: RulePatch, ctx=Depends(get_tenant_ctx)):
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        r = db.get(TenantMatchingRule, rule_id)
+        if not r:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Règle introuvable")
+        if body.is_active is not None:
+            r.is_active = body.is_active
+        if body.priority is not None:
+            r.priority = body.priority
+        out = {"id": str(r.id), "is_active": r.is_active, "priority": r.priority}
+        db.commit()
+
+    audit(actor=ctx.user, action="rule.updated", target_id=rule_id, metadata=out)
+    return out
+
+
+@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_rule(rule_id: str, ctx=Depends(get_tenant_ctx)):
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        r = db.get(TenantMatchingRule, rule_id)
+        if not r:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Règle introuvable")
+        meta = {"type": r.rule_type, "pattern": r.pattern}
+        db.delete(r)
+        db.commit()
+
+    audit(actor=ctx.user, action="rule.deleted", target_id=rule_id, metadata=meta)
+
+
+@router.post("/rules/test")
+def test_rules(body: RuleTestIn):
+    """Banc d'essai : à quel domaine CE message serait-il attribué ?
+
+    Rejoue la cascade réelle, sans rien écrire. C'est le seul moyen de vérifier une
+    règle avant qu'elle ne se mette à ranger de vraies données — et de comprendre
+    pourquoi un rapport part en quarantaine.
+    """
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        rules = (db.query(TenantMatchingRule).filter_by(is_active=True)
+                   .order_by(TenantMatchingRule.priority.asc()).all())
+        match = TenantResolverService()._match(body.from_address, body.subject, rules)
+        domain = None
+        if match.tenant_id:
+            t = db.get(Tenant, match.tenant_id)
+            domain = t.domain if t else None
+
+    return {"tenant_id": match.tenant_id, "domain": domain,
+            "method": match.method, "confidence": round(match.confidence, 3),
+            "quarantined": match.tenant_id is None}
 
 
 # ------------------------------------------------------------------------ comptes
