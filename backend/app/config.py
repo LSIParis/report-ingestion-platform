@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     jwt_private_key: str = ""
     jwt_public_key_file: str = ""      # prod : chemin d'un fichier PEM monté (prioritaire si présent)
     jwt_private_key_file: str = ""
+    # Portainer écrit les variables dans un stack.env (une ligne par variable) : une
+    # valeur multiligne comme un PEM y est impossible. Variante base64, sur une ligne.
+    jwt_public_key_b64: str = ""
+    jwt_private_key_b64: str = ""
     jwt_issuer: str = "report-platform"
     jwt_audience: str = "report-dashboard"
     jwt_ttl_seconds: int = 3600
@@ -46,14 +50,19 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     def model_post_init(self, __context) -> None:
-        # Si un *_file est fourni, il alimente la clé correspondante (prod).
+        """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""
+        import base64
         from pathlib import Path
-        if self.jwt_public_key_file and Path(self.jwt_public_key_file).is_file():
-            object.__setattr__(self, "jwt_public_key",
-                               Path(self.jwt_public_key_file).read_text(encoding="utf-8"))
-        if self.jwt_private_key_file and Path(self.jwt_private_key_file).is_file():
-            object.__setattr__(self, "jwt_private_key",
-                               Path(self.jwt_private_key_file).read_text(encoding="utf-8"))
+
+        for name in ("jwt_public_key", "jwt_private_key"):
+            path = getattr(self, f"{name}_file")
+            if path and Path(path).is_file():
+                object.__setattr__(self, name, Path(path).read_text(encoding="utf-8"))
+                continue
+            b64 = getattr(self, f"{name}_b64")
+            if b64:
+                object.__setattr__(
+                    self, name, base64.b64decode(b64).decode("utf-8"))
 
 
 @lru_cache
