@@ -1,0 +1,186 @@
+# ============================================================================
+# Stack PORTAINER — derrière un reverse-proxy EXISTANT (Nginx Proxy Manager,
+# Traefik…) qui occupe déjà 80/443. Aucun port n'est publié sur l'hôte.
+#
+# Déploiement (mode Repository) :
+#   Repository URL : https://github.com/LSIParis/report-ingestion-platform
+#   Compose path   : infra/portainer-stack.npm.yml
+#
+# Images tirées depuis GHCR (build par .github/workflows/build-images.yml).
+#
+# Réseaux :
+#  - `internal` (privé, non exposé) : postgres, redis, minio, clamav, api, worker…
+#  - `proxy` (EXTERNE, celui de NPM) : seuls `frontend` et `minio` y sont exposés,
+#    sous les alias `reports-frontend` et `reports-minio` pour éviter toute
+#    collision de noms avec les autres stacks partageant ce réseau.
+#
+# À configurer dans NPM, deux Proxy Hosts :
+#   DOMAIN        → http://reports-frontend:80   (le nginx du front route /api/* vers l'API)
+#   FILES_DOMAIN  → http://reports-minio:9000    (NPM conserve le Host par défaut :
+#                                                 indispensable, sinon la signature
+#                                                 SigV4 des URLs présignées casse)
+# ============================================================================
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: reports
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-roles.sql:/docker-entrypoint-initdb.d/init-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    networks:
+      internal:
+      proxy:
+        aliases: [reports-minio]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+
+  createbuckets:
+    image: minio/mc
+    networks: [internal]
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb -p local/reports-raw;
+      exit 0;"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - clamavdb:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  migrate:
+    image: ghcr.io/lsiparis/report-api:latest
+    command: alembic upgrade head
+    networks: [internal]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL_MIGRATE: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/reports
+
+  api:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    networks: [internal]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+
+  worker:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: celery -A app.celery_app worker -l info --concurrency 4
+    networks: [internal]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      clamav: { condition: service_started }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${FILES_DOMAIN}
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      ANTIVIRUS_ENABLED: "true"
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+
+  imap-worker:
+    image: ghcr.io/lsiparis/report-api:latest
+    restart: unless-stopped
+    command: python -m app.workers.imap_worker
+    networks: [internal]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: reports-raw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      IMAP_HOST: ${IMAP_HOST}
+      IMAP_USER: ${IMAP_USER}
+      IMAP_PASSWORD: ${IMAP_PASSWORD}
+
+  frontend:
+    image: ghcr.io/lsiparis/report-frontend:latest
+    restart: unless-stopped
+    networks:
+      internal:
+      proxy:
+        aliases: [reports-frontend]
+    depends_on: [api]
+
+networks:
+  internal:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
+
+volumes:
+  pgdata:
+  miniodata:
+  redisdata:
+  clamavdb:
