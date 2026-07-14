@@ -60,3 +60,41 @@ def test_zip_corrompu_leve_une_erreur_rattrapable():
     entete_pk_mais_structure_invalide = b"PK\x03\x04" + b"\x00" * 40
     with pytest.raises(ValueError):
         decompress(entete_pk_mais_structure_invalide)
+
+
+def test_gzip_tronque_leve_une_erreur_rattrapable():
+    # Un flux gzip valide auquel on ampute la fin lève EOFError depuis la stdlib
+    # (ni ValueError ni OSError) : hors contrat sans traduction explicite.
+    complet = gzip.compress(b'{"report-id": "x"}' * 100)
+    tronque = complet[: len(complet) - 10]
+    with pytest.raises(ValueError):
+        decompress(tronque)
+
+
+def test_gzip_corrompu_en_cours_de_flux_leve_une_erreur_rattrapable():
+    # Corrompre des octets au milieu du flux compressé (après l'en-tête) casse
+    # l'inflate en cours de lecture : zlib.error, pas ValueError ni OSError.
+    complet = bytearray(gzip.compress(b'{"report-id": "x"}' * 1000))
+    milieu = len(complet) // 2
+    for i in range(milieu, milieu + 20):
+        complet[i] ^= 0xFF
+    with pytest.raises(ValueError):
+        decompress(bytes(complet))
+
+
+def test_zip_au_crc_invalide_leve_une_erreur_rattrapable():
+    # Répertoire central valide, mais les données compressées de l'entrée sont
+    # corrompues : zipfile.BadZipFile (mauvais CRC-32) est levée À LA LECTURE
+    # (z.open / _bounded_read), donc hors du try/except qui n'entoure que le
+    # constructeur ZipFile().
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("rapport.xml", "<feedback>" + "x" * 1000 + "</feedback>")
+    data = bytearray(buf.getvalue())
+    # Le contenu compressé de l'entrée suit l'en-tête local + nom de fichier ;
+    # on le corrompt sans toucher au répertoire central en fin d'archive.
+    offset = 30 + len("rapport.xml")
+    data[offset] ^= 0xFF
+    data[offset + 1] ^= 0xFF
+    with pytest.raises(ValueError):
+        decompress(bytes(data))

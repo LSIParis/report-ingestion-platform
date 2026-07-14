@@ -25,24 +25,44 @@ class DecompressionTooLarge(ValueError):
 
 def decompress(raw: bytes) -> bytes:
     """gzip, zip ou contenu nu → octets. Détection par nombre magique, pas par extension
-    (le nom de fichier vient de l'expéditeur, on ne lui fait pas confiance)."""
+    (le nom de fichier vient de l'expéditeur, on ne lui fait pas confiance).
+
+    Contrat : ne laisse jamais fuir autre chose que `DecompressionTooLarge` ou
+    `ValueError`. Voir `_decompress` pour la logique, et le commentaire sur
+    l'enveloppe ci-dessous pour la raison du `except Exception` large."""
+    try:
+        return _decompress(raw)
+    except DecompressionTooLarge:
+        raise  # déjà au contrat, et c'est un signal de sécurité
+    except Exception as exc:  # noqa: BLE001 — VOULU, voir le commentaire ci-dessus.
+        # `raw` est un octet-flux hostile venu d'Internet, pas un format qu'on contrôle.
+        # La liste des exceptions que les décompresseurs de la stdlib peuvent lever
+        # n'est PAS énumérable de façon fiable ni stable dans le temps : EOFError (gzip
+        # tronqué), zlib.error (flux gzip corrompu en cours de lecture), BadZipFile
+        # (CRC-32 invalide — et il se lève à la LECTURE de l'entrée, pas seulement à
+        # l'ouverture de l'archive), struct.error (en-tête zip malformé)... et demain un
+        # format de plus (lzma, bz2) avec sa propre famille d'exceptions. Coder en dur
+        # `except (EOFError, zlib.error, BadZipFile, struct.error)` revient à parier
+        # qu'on a trouvé la liste complète — pari perdu d'avance face à du contenu
+        # hostile. Le seul contrat tenable pour les appelants (adaptateur DMARC,
+        # adaptateur TLS-RPT, détecteur de format) est : « ça marche, ou ça lève une
+        # erreur que je sais attraper ». Sans cette traduction totale, une seule pièce
+        # jointe pourrie remonte une exception inattendue jusqu'au `except Exception`
+        # de `process_email`, qui marque alors TOUT L'EMAIL en échec (retries, puis
+        # dead-letter) au lieu du chemin tolérant : un `ParseResult(status="failed")`
+        # pour cette seule pièce jointe.
+        raise ValueError(f"archive illisible : {exc}") from exc
+
+
+def _decompress(raw: bytes) -> bytes:
+    """Logique de décompression proprement dite — peut laisser fuir n'importe quelle
+    exception de la stdlib (gzip, zlib, zipfile...) ; c'est `decompress()` qui les
+    ramène toutes au contrat `DecompressionTooLarge | ValueError`."""
     if raw[:2] == b"\x1f\x8b":
         return _bounded_read(gzip.GzipFile(fileobj=io.BytesIO(raw)))
 
     if raw[:2] == b"PK":
-        # Contrat de cette fonction : ne jamais laisser fuir autre chose que
-        # DecompressionTooLarge, ValueError ou OSError — tous les appelants (adaptateur
-        # DMARC, adaptateur TLS-RPT, détecteur de format) se fient à ce contrat pour
-        # écrire un ParseResult(status="failed") plutôt que de faire tomber tout l'email.
-        # Piège : zipfile.BadZipFile N'HÉRITE PAS DE ValueError (son MRO est
-        # BadZipFile -> Exception -> BaseException), contre-intuitif vu son nom. Sans
-        # cette traduction explicite, une archive structurellement invalide (en-tête
-        # PK mais contenu corrompu) remonterait telle quelle et échapperait au
-        # `except (..., ValueError, OSError)` des appelants.
-        try:
-            zf = zipfile.ZipFile(io.BytesIO(raw))
-        except zipfile.BadZipFile as exc:
-            raise ValueError(f"zip corrompu : {exc}") from exc
+        zf = zipfile.ZipFile(io.BytesIO(raw))
         with zf as z:
             # Un rapport (XML pour DMARC, JSON pour TLS-RPT) : on ne devine pas le
             # format d'une entrée d'extension inconnue, on la rejette — dans le doute,
@@ -55,6 +75,8 @@ def decompress(raw: bytes) -> bytes:
             # la lecture : un en-tête zip peut mentir.
             if z.getinfo(name).file_size > MAX_BYTES:
                 raise DecompressionTooLarge(f"{name} annonce une taille excessive")
+            # zipfile.BadZipFile (CRC-32 invalide) peut être levée ICI, à la lecture,
+            # bien après l'ouverture réussie de l'archive — voir decompress().
             return _bounded_read(z.open(name))
 
     return raw
