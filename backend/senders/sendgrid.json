@@ -1,0 +1,7 @@
+{
+  "key": "sendgrid",
+  "name": "SendGrid",
+  "ptr_suffixes": [".sendgrid.net"],
+  "spf_include": "sendgrid.net",
+  "remediation": "Ajoutez `include:sendgrid.net` à votre enregistrement SPF, puis activez la signature DKIM (Sender Authentication) dans la console SendGrid — sans DKIM, le courrier transféré perdra l'alignement."
+}

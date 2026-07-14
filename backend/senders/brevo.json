@@ -1,0 +1,7 @@
+{
+  "key": "brevo",
+  "name": "Brevo",
+  "ptr_suffixes": [".sendibm1.com", ".sendibm2.com", ".sendibm3.com", ".smtp-brevo.com"],
+  "spf_include": "spf.brevo.com",
+  "remediation": "Ajoutez `include:spf.brevo.com` à votre enregistrement SPF, et publiez l'enregistrement DKIM (`mail._domainkey`) fourni par Brevo dans Paramètres → Expéditeurs et domaines."
+}

@@ -23,6 +23,7 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY app ./app
 COPY profiles ./profiles
+COPY senders ./senders
 COPY scripts ./scripts
 COPY tests ./tests
 COPY alembic.ini ./

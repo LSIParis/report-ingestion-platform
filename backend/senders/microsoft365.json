@@ -1,0 +1,7 @@
+{
+  "key": "microsoft365",
+  "name": "Microsoft 365",
+  "ptr_suffixes": [".mail.protection.outlook.com", ".outbound.protection.outlook.com"],
+  "spf_include": "spf.protection.outlook.com",
+  "remediation": "Ajoutez `include:spf.protection.outlook.com` à votre enregistrement SPF, et publiez les deux CNAME DKIM fournis par le centre d'administration Microsoft 365 (Sécurité → Politiques → DKIM)."
+}
