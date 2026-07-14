@@ -99,7 +99,19 @@ export function MtaStsPanel({
           </p>
         </header>
 
-        {tls.data && <TlsVerdict p={tls.data} />}
+        {tls.isLoading ? (
+          <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
+            Vérification des rapports TLS en cours…
+          </div>
+        ) : tls.isError ? (
+          <div className="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <strong>La posture TLS n'a pas pu être vérifiée.</strong> On ne sait donc rien
+            de l'état du chiffrement pour ce domaine — ce n'est en aucun cas le signe que
+            tout va bien. Réessayez avant d'envisager le mode appliqué.
+          </div>
+        ) : (
+          tls.data && <TlsVerdict p={tls.data} />
+        )}
 
         <fieldset className="space-y-2">
           <legend className="text-xs uppercase tracking-wide text-gray-500">Mode</legend>
@@ -278,23 +290,33 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
   // les deux cas, le mode appliqué refuserait potentiellement du courrier légitime. On dit
   // les deux séparément, sinon un exploitant qui ne voit aucun échec ne comprendra pas
   // pourquoi le feu vert lui est refusé.
+  // La phrase de clôture diffère selon la branche : quand il y a des échecs connus, on peut
+  // parler de « ces messages » sans mentir. Quand il n'y a QUE de l'incomplétude, aucun
+  // message en échec n'est identifié — on ne peut affirmer que de l'incertitude, pas un fait.
   return (
     <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
       {p.sessions_failed > 0 ? (
-        <strong>
-          {p.sessions_failed.toLocaleString("fr-FR")} session
-          {p.sessions_failed > 1 ? "s" : ""} en échec de chiffrement sur {p.days} jours
-        </strong>
+        <>
+          <strong>
+            {p.sessions_failed.toLocaleString("fr-FR")} session
+            {plural(p.sessions_failed)} en échec de chiffrement sur {p.days} jours
+          </strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). En mode
+          appliqué, ces messages seraient <strong>refusés</strong>. Corrigez d'abord.
+        </>
       ) : (
-        <strong>Aucun échec visible, mais des données incomplètes sur {p.days} jours.</strong>
-      )}{" "}
-      (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). En mode
-      appliqué, ces messages seraient <strong>refusés</strong>. Corrigez d'abord.
+        <>
+          <strong>Aucun échec visible, mais des données incomplètes sur {p.days} jours.</strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). Impossible
+          de garantir qu'aucun message ne serait refusé en mode appliqué : les rapports
+          reçus sont incomplets.
+        </>
+      )}
       {p.incomplete_rows > 0 && (
         <p className="mt-2">
           <strong>
-            {p.incomplete_rows} ligne{p.incomplete_rows > 1 ? "s" : ""} de résumé
-            incomplète{p.incomplete_rows > 1 ? "s" : ""}
+            {p.incomplete_rows} ligne{plural(p.incomplete_rows)} de résumé
+            incomplète{plural(p.incomplete_rows)}
           </strong>{" "}
           : un fournisseur a rapporté un résultat sans indiquer combien de sessions il
           couvrait. Le nombre réel d'échecs peut donc être supérieur à ce qui est affiché
@@ -316,12 +338,17 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
   );
 }
 
+// Accord du pluriel français, factorisé pour éviter la répétition de `n > 1 ? "s" : ""`.
+function plural(n: number): string {
+  return n > 1 ? "s" : "";
+}
+
 /* sessions === null : la magnitude est inconnue (aucune occurrence lisible dans le
    rapport) — on ne l'affiche JAMAIS comme « 0 session », ce serait rassurant et faux.
    partial === true : le nombre est un MINORANT, le vrai total peut être plus élevé. */
 function formatFailureSessions(f: TlsFailure): string {
   if (f.sessions === null) return "nombre de sessions inconnu";
   const n = f.sessions.toLocaleString("fr-FR");
-  const suffix = f.sessions > 1 ? "s" : "";
+  const suffix = plural(f.sessions);
   return f.partial ? `au moins ${n} session${suffix}` : `${n} session${suffix}`;
 }
