@@ -52,7 +52,9 @@ export function Alerts() {
       )}
 
       {data && data.length === 0 && (
-        <p className="text-gray-500">Aucune alerte ouverte.</p>
+        <p className="text-gray-500">
+          {status === "open" ? "Aucune alerte ouverte." : "Aucune alerte."}
+        </p>
       )}
 
       <ul className="space-y-3">

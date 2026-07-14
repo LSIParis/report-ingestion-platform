@@ -302,7 +302,7 @@ def requeue_quarantine(ctx=Depends(get_tenant_ctx)):
 
 
 @router.get("/alerts")
-def list_alerts(status: str = Query("open", pattern="^(open|all)$")):
+def list_alerts(statut: str = Query("open", pattern="^(open|all)$", alias="status")):
     """Les alertes, tous domaines confondus — c'est une vue d'exploitant.
 
     Plan admin explicite (bypass), comme `list_tenants` : cette page existe précisément
@@ -312,10 +312,14 @@ def list_alerts(status: str = Query("open", pattern="^(open|all)$")):
 
     Les ouvertes d'abord, les plus récentes en tête : on veut savoir ce qui brûle
     maintenant, pas relire l'histoire.
+
+    Le paramètre de fonction s'appelle `statut` (le nom `status` masquerait le module
+    `fastapi.status` utilisé partout ailleurs dans ce fichier) ; l'alias conserve
+    `?status=` comme contrat d'API, inchangé côté front.
     """
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:
         q = db.query(Alert, Tenant.domain).join(Tenant, Alert.tenant_id == Tenant.id)
-        if status == "open":
+        if statut == "open":
             q = q.filter(Alert.closed_at.is_(None))
         rows = q.order_by(Alert.closed_at.is_(None).desc(),
                           Alert.opened_at.desc()).limit(200).all()
