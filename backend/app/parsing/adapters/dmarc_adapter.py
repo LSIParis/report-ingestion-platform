@@ -13,55 +13,13 @@ enrichi des champs de niveau rapport pour que chaque ligne soit auto-portante.
 """
 from __future__ import annotations
 
-import gzip
-import io
-import zipfile
 from datetime import datetime, timezone
 
 from defusedxml.ElementTree import fromstring
 
 from app.parsing.base import ParseResult, ReportAdapter
+from app.parsing.compression import DecompressionTooLarge, decompress
 from app.parsing.registry import register
-
-# Un rapport DMARC réel pèse quelques dizaines de Ko à quelques Mo.
-# 64 Mo décompressés est déjà très large : au-delà, c'est une bombe, pas un rapport.
-MAX_XML_BYTES = 64 * 1024 * 1024
-_CHUNK = 1 << 20
-
-
-class DecompressionTooLarge(ValueError):
-    """L'archive dépasse la taille décompressée autorisée (bombe probable)."""
-
-
-def decompress(raw: bytes) -> bytes:
-    """gzip, zip ou XML brut → octets XML. Détection par nombre magique, pas par
-    extension (le nom de fichier vient de l'expéditeur, on ne lui fait pas confiance)."""
-    if raw[:2] == b"\x1f\x8b":
-        return _bounded_read(gzip.GzipFile(fileobj=io.BytesIO(raw)))
-
-    if raw[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            names = [n for n in z.namelist() if n.lower().endswith(".xml")]
-            if not names:
-                raise ValueError("archive zip sans fichier .xml")
-            # On se fie à la taille ANNONCÉE pour rejeter tôt, puis on borne quand même
-            # la lecture : un en-tête zip peut mentir.
-            if z.getinfo(names[0]).file_size > MAX_XML_BYTES:
-                raise DecompressionTooLarge(f"{names[0]} annonce une taille excessive")
-            return _bounded_read(z.open(names[0]))
-
-    return raw
-
-
-def _bounded_read(stream) -> bytes:
-    out = io.BytesIO()
-    with stream as f:
-        while chunk := f.read(_CHUNK):
-            out.write(chunk)
-            if out.tell() > MAX_XML_BYTES:
-                raise DecompressionTooLarge(
-                    f"contenu décompressé > {MAX_XML_BYTES} octets")
-    return out.getvalue()
 
 
 def _text(node, path: str) -> str | None:
@@ -94,7 +52,7 @@ class DmarcXmlAdapter(ReportAdapter):
     def parse(self, raw: bytes, profile) -> ParseResult:
         try:
             xml = decompress(raw)
-        except (DecompressionTooLarge, ValueError, OSError, zipfile.BadZipFile) as exc:
+        except (DecompressionTooLarge, ValueError, OSError) as exc:
             return ParseResult(status="failed",
                                errors=[{"code": "DMARC_DECOMPRESS", "message": str(exc),
                                         "severity": "fatal"}])
