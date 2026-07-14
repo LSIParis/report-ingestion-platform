@@ -37,6 +37,18 @@ Deux pièges, tous deux mortels, tous deux évités ici :
    ligne dès qu'un des deux compteurs manque, et `safe_to_enforce` reste bloqué — mais
    le chiffre affiché à l'écran, lui, ne cache jamais un échec qu'on connaît.
 
+ - Ne pas supposer qu'une ligne `failure` en base implique toujours un `summary`
+   coherent : `total`, `sessions_failed` et `incomplete_rows` viennent EXCLUSIVEMENT
+   des lignes `summary`. Mais un `summary` peut echouer a se normaliser (compteur
+   illisible -> TYPE_CAST -> ligne entiere rejetee par le normaliseur) alors que les
+   lignes `failure` du meme rapport se normalisent tres bien et sont persistees. Sans
+   verifier aussi `failures`, `safe_to_enforce` pourrait valoir `True` avec des echecs
+   ecrits en base (voir le commentaire sur `not failures` plus bas). Ce n'est PAS un
+   contournement du principe "le total vient toujours des lignes summary" : ce
+   principe regit le calcul d'un NOMBRE (pas de double comptage), tandis que
+   `safe_to_enforce` est un BOOLEEN distinct qui doit rester `False` des qu'un echec
+   connu existe, peu importe par quelle ligne il a ete vu.
+
 Le service ne connaît pas le tenant : il reçoit une session **déjà scopée**. C'est ce qui
 le rend testable seul et incapable de fuiter — aucun `WHERE tenant_id` applicatif, la RLS
 fait le travail (CLAUDE.md).
@@ -46,6 +58,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.db.models import ReportRow
+from app.services.counters import int_or_none as _int_or_none
 
 _kind = ReportRow.data["kind"].astext
 _report_date = ReportRow.data["report_date"].astext
@@ -161,18 +174,22 @@ def posture(db, days: int = 30) -> dict:
         # preuve — ni au niveau du domaine (aucun rapport), ni au niveau du champ
         # (un compteur absent dans un rapport reçu). Une seule ligne incomplète suffit
         # à refuser : on ne dit « c'est sûr » que si on a réellement TOUT lu.
-        "safe_to_enforce": total > 0 and sessions_failed == 0 and incomplete_rows == 0,
+        #
+        # `not failures` en plus : PAS un double comptage (`safe_to_enforce` est un
+        # booleen, pas une somme -- le total, lui, continue de venir exclusivement des
+        # lignes `summary`, voir le commentaire de module). C'est un garde-fou
+        # separe : une ligne `summary` peut echouer a se normaliser (compteur
+        # illisible -> TYPE_CAST -> ligne rejetee par le normaliseur) pendant que les
+        # lignes `failure` du meme rapport, elles, se normalisent et sont persistees.
+        # Sans ce garde, `sessions_failed` et `incomplete_rows` resteraient a 0 (la
+        # ligne muette n'arrive jamais en base) alors que `failures` decrit des echecs
+        # reels : feu vert errone. Ne retire jamais ce garde au nom du "on compte deja
+        # les echecs ailleurs" -- ce n'est justement pas la meme chose que compter.
+        "safe_to_enforce": (total > 0 and sessions_failed == 0
+                            and incomplete_rows == 0 and not failures),
         "reporters": sorted(reporters),
     }
 
-
-def _int_or_none(value) -> int | None:
-    """Distingue « illisible » de « zéro » : `None` en entrée, ou une valeur non
-    castable, renvoie `None` — jamais 0. Utilisé pour tous les compteurs de sessions
-    (`summary` et `failure`) : un silence ne doit jamais devenir un zéro fabriqué."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+# `_int_or_none` (l'alias importe ci-dessus) vit maintenant dans
+# `app.services.counters` : partage avec `ip_intel._activite`, qui applique la meme
+# regle aux memes compteurs (voir le docstring de ce module).

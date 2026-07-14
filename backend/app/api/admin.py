@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 
@@ -166,7 +166,7 @@ def get_mta_sts(tenant_id: str):
 
 
 @router.get("/tenants/{tenant_id}/tls-posture")
-def tenant_tls_posture(tenant_id: str, days: int = 30):
+def tenant_tls_posture(tenant_id: str, days: int = Query(30, ge=1, le=365)):
     """Les rapports TLS de CE domaine — la seule chose qui permette de décider d'un
     passage en `enforce` sans durcir à l'aveugle.
 

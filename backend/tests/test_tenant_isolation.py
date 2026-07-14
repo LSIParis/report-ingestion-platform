@@ -68,6 +68,41 @@ def test_ip_vue_par_b_est_invisible_de_a(seed_two_tenants):
             db.commit()
 
 
+def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
+    """`tls_posture.posture()` alimente l'ecran qui autorise le passage de MTA-STS en
+    `enforce` -- une lecture agregee de report_row, comme les autres, doit rester
+    filtree par la RLS. Sans ce test bloquant, une regression future dans `posture()`
+    (ex. un `bypass=True` ajoute par erreur, ou une session non scopee) ne serait
+    detectee par aucun test bloquant : A verrait la posture TLS de B, et pourrait
+    durcir `enforce` sur la foi de donnees qui ne sont pas les siennes.
+    """
+    from datetime import date
+
+    from app.db.models import ReportRow
+    from app.services.tls_posture import posture
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:  # plan worker : on seme chez B
+        rep_b = db.query(Report).filter_by(tenant_id=tid_b).first()
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id, data={
+            "kind": "summary", "report_date": date.today().isoformat(),
+            "policy_domain": "tenant-b-test.com",
+            "successful_sessions": 100, "failed_sessions": 5}))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:  # A lit sa propre posture
+            p = posture(db, days=30)
+            assert p["sessions_total"] == 0, "A voit des sessions TLS de B"
+    finally:
+        with get_session() as db:
+            db.query(ReportRow).filter(
+                ReportRow.data["policy_domain"].astext == "tenant-b-test.com").delete(
+                synchronize_session=False)
+            db.commit()
+
+
 def test_ip_TLS_vue_par_b_est_invisible_de_a(seed_two_tenants):
     """Même principe que pour une IP DMARC : le contrôle d'appartenance de /ip-intel
     interroge maintenant DEUX champs. Il doit rester aveugle aux lignes des autres.

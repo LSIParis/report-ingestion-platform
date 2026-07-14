@@ -122,6 +122,44 @@ def test_pas_de_double_comptage(tenant_tls):
     }]
 
 
+def test_echecs_sans_summary_bloquent_safe_to_enforce(tenant_tls):
+    """Scenario reel et atteignable : un fournisseur envoie
+    `"total-failure-session-count": 5.0` (un flottant, un nombre JSON parfaitement
+    legal). `NormalizationService._cast` fait `int("5.0")` -> `ValueError` ->
+    erreur `TYPE_CAST` de severite `error` -> le normaliseur EXCLUT la ligne
+    `summary` entiere. Les lignes `failure` du meme rapport, elles, se normalisent
+    tres bien (`failure_sessions: 5` est un int) et sont persistees.
+
+    Sans le garde `not failures`, `sessions_failed` resterait a 0 et
+    `incomplete_rows` a 0 (la ligne muette n'est jamais arrivee en base) alors que
+    `failures` decrit 5 echecs reels : `safe_to_enforce` vaudrait `True`. Feu vert,
+    avec 5 echecs de chiffrement en base.
+    """
+    tid, rid = tenant_tls
+    # Un autre fournisseur, propre celui-la : total > 0, sans quoi le bug reste
+    # invisible (total == 0 bloquerait deja safe_to_enforce, par un autre chemin).
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+    # Le fournisseur en cause : sa ligne summary a ete exclue par le normaliseur
+    # (compteur illisible, ex. un flottant JSON valide comme 5.0 -> int("5.0")
+    # leve ValueError -> TYPE_CAST -> ligne entiere rejetee). Seule sa ligne
+    # `failure`, elle, s'est normalisee et est arrivee en base.
+    _seme(tid, rid, {"kind": "failure", "result_type": "certificate-expired",
+                     "sending_mta_ip": "203.0.113.5",
+                     "receiving_mx_hostname": "mx.tls-test.example",
+                     "failure_sessions": 5})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["sessions_total"] == 1000   # > 0 : le piege est bien tendu
+    assert p["sessions_failed"] == 0     # confirme l'hypothese du scenario
+    assert p["incomplete_rows"] == 0     # confirme l'hypothese du scenario
+    assert p["failures"] != []           # mais des echecs SONT ecrits en base
+    assert p["safe_to_enforce"] is False, (
+        "feu vert alors que 5 echecs de chiffrement sont en base")
+
+
 def test_hors_fenetre_est_ignore(tenant_tls):
     tid, rid = tenant_tls
     _seme(tid, rid, {"kind": "summary", "successful_sessions": 10,
@@ -415,3 +453,17 @@ def test_tenant_connu_renvoie_la_posture(admin_client, tenant_tls):
     r = admin_client.get(f"/admin/tenants/{tid}/tls-posture")
     assert r.status_code == 200
     assert r.json()["sessions_total"] == 10
+
+
+def test_days_hors_bornes_est_rejete(admin_client, tenant_tls):
+    """Alignee sur metrics.py (days: int = Query(30, ge=1, le=365)) : sans borne,
+    days=99999999 declenche un OverflowError (-> 500) dans `date.today() -
+    timedelta(days=days)`, et days=1 (ou moins) produirait un feu vert sur une
+    fenetre absurdement courte."""
+    tid, _ = tenant_tls
+
+    assert admin_client.get(f"/admin/tenants/{tid}/tls-posture?days=0").status_code == 422
+    assert admin_client.get(
+        f"/admin/tenants/{tid}/tls-posture?days=99999999").status_code == 422
+    assert admin_client.get(
+        f"/admin/tenants/{tid}/tls-posture?days=366").status_code == 422
