@@ -96,11 +96,11 @@ class TlsRptAdapter(ReportAdapter):
 
         meta = {**header, "policy_domain": policy_domain, "row_count": len(rows)}
 
-        if not rows:
-            errors.append({"code": "TLSRPT_NO_POLICY", "severity": "error",
-                           "message": "rapport sans politique exploitable"})
-            return ParseResult(status="failed", errors=errors, metadata=meta)
-
+        # Pas de garde « rows vide » ici : `policy_domain` n'est affecté qu'après un
+        # appel réussi à `_policy_rows`, qui renvoie toujours au moins une ligne
+        # `summary` (voir plus bas). Si `policy_domain` est non nul, `rows` l'est donc
+        # forcément aussi — contrairement à l'adaptateur DMARC, où le domaine de
+        # politique vient d'un nœud distinct des `<record>` et où la garde a un sens.
         return ParseResult(status="partial" if errors else "ok",
                            rows=rows, errors=errors, metadata=meta)
 
