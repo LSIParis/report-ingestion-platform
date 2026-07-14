@@ -99,7 +99,17 @@ export function MtaStsPanel({
           </p>
         </header>
 
-        {tls.isLoading ? (
+        {/* isPending, PAS isLoading : en TanStack Query v5, isLoading vaut
+            isPending && isFetching. Si le réseau tombe (VPN, veille, proxy) avant la
+            première réponse, fetchStatus passe à "paused" : isFetching redevient false,
+            donc isLoading redevient false alors qu'on n'a TOUJOURS aucune donnée et
+            aucune erreur. Les trois branches échoueraient et le bandeau disparaîtrait en
+            silence — exactement le bug qu'on vient de corriger. isPending, lui, reste vrai
+            tant qu'il n'y a pas de données, en chargement comme en pause : les trois
+            branches (isPending / isError / data) redeviennent exhaustives sur `status`.
+            Ce piège ne se voit jamais en développement, où le réseau ne tombe pas — ne
+            "simplifie" pas ceci en isLoading. */}
+        {tls.isPending ? (
           <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
             Vérification des rapports TLS en cours…
           </div>
@@ -286,13 +296,16 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
     );
   }
 
-  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport) : dans
-  // les deux cas, le mode appliqué refuserait potentiellement du courrier légitime. On dit
-  // les deux séparément, sinon un exploitant qui ne voit aucun échec ne comprendra pas
-  // pourquoi le feu vert lui est refusé.
+  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport), ou ni
+  // l'un ni l'autre : trois situations distinctes qui font toutes échouer safe_to_enforce,
+  // et qu'on ne confond jamais entre elles. On ne dit « données incomplètes » que si
+  // p.incomplete_rows > 0 le confirme réellement — jamais par déduction du seul fait
+  // qu'on est arrivé dans cette branche (rien ne garantit ce lien côté TypeScript).
   // La phrase de clôture diffère selon la branche : quand il y a des échecs connus, on peut
-  // parler de « ces messages » sans mentir. Quand il n'y a QUE de l'incomplétude, aucun
-  // message en échec n'est identifié — on ne peut affirmer que de l'incertitude, pas un fait.
+  // parler de « ces messages » sans mentir. Quand il y a de l'incomplétude constatée, on
+  // n'affirme que de l'incertitude, pas un fait. Et quand ni l'un ni l'autre n'est établi
+  // (résiduel), on se contente de dire que le feu vert n'est pas garanti — jamais plus que
+  // ce que les données montrent.
   return (
     <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
       {p.sessions_failed > 0 ? (
@@ -304,12 +317,19 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
           (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). En mode
           appliqué, ces messages seraient <strong>refusés</strong>. Corrigez d'abord.
         </>
-      ) : (
+      ) : p.incomplete_rows > 0 ? (
         <>
           <strong>Aucun échec visible, mais des données incomplètes sur {p.days} jours.</strong>{" "}
           (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). Impossible
           de garantir qu'aucun message ne serait refusé en mode appliqué : les rapports
           reçus sont incomplets.
+        </>
+      ) : (
+        <>
+          <strong>Le feu vert n'est pas atteint sur {p.days} jours.</strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées, aucun échec
+          connu, aucune incomplétude constatée). Le passage en mode appliqué ne peut pas
+          être garanti sûr avec les données disponibles.
         </>
       )}
       {p.incomplete_rows > 0 && (
