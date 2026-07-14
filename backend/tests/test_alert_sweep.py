@@ -16,6 +16,32 @@ from app.db.session import get_session
 from app.workers import tasks
 
 
+@pytest.fixture(autouse=True)
+def _sans_fuite_alertes():
+    """`sweep_alerts()` itère TOUS les tenants actifs de la base -- y compris des
+    tenants de seed (`scripts.seed`) ou tout autre tenant déjà présent, que ce fichier
+    ne crée ni ne nettoie. Un test qui appelle `sweep_alerts()` peut donc laisser des
+    `Alert` derrière lui sur des tenants qui ne lui appartiennent pas -- les fixtures
+    dédiées de ce fichier (`deux_domaines`, `domaine_tls`, `un_tenant`) ne nettoient
+    QUE leurs propres tenants.
+
+    Snapshot avant/après, autour de chaque test : tout `Alert` apparu pendant le test
+    et pas déjà nettoyé par la fixture spécifique du test (qui s'exécute avant, cf.
+    ordre LIFO des fixtures pytest) est supprimé ici. Filet générique, pas une
+    duplication des nettoyages déjà en place.
+    """
+    with get_session() as db:
+        avant = {r.id for r in db.query(Alert.id).all()}
+
+    yield
+
+    with get_session() as db:
+        nouvelles = [r.id for r in db.query(Alert.id).all() if r.id not in avant]
+        if nouvelles:
+            db.query(Alert).filter(Alert.id.in_(nouvelles)).delete(synchronize_session=False)
+            db.commit()
+
+
 @pytest.fixture
 def deux_domaines():
     """A et B, tous deux vieux et sans aucun rapport → chacun doit lever never_reported,
@@ -81,7 +107,7 @@ def domaine_b_a_deja_un_rapport(deux_domaines):
 
 
 def test_le_balayage_ouvre_une_alerte_par_domaine(deux_domaines, monkeypatch):
-    monkeypatch.setattr(tasks.notify_alert, "delay", lambda *a, **k: None)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
 
     tasks.sweep_alerts()
 
@@ -109,7 +135,7 @@ def test_le_balayage_scope_bien_chaque_tenant(domaine_b_a_deja_un_rapport, monke
     ce test ROUGE avec `reconcile_tenant` branché sur `get_session()` (bypass), VERT
     remis sur `tenant_scoped_session(...)`.
     """
-    monkeypatch.setattr(tasks.notify_alert, "delay", lambda *a, **k: None)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
     tid_a, tid_b = domaine_b_a_deja_un_rapport
 
     tasks.sweep_alerts()
@@ -126,7 +152,7 @@ def test_le_balayage_scope_bien_chaque_tenant(domaine_b_a_deja_un_rapport, monke
 
 
 def test_le_balayage_ignore_un_domaine_suspendu(deux_domaines, monkeypatch):
-    monkeypatch.setattr(tasks.notify_alert, "delay", lambda *a, **k: None)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
     tid_a, tid_b = deux_domaines
     with get_session() as db:
         db.get(Tenant, tid_b).status = "suspended"
@@ -139,7 +165,7 @@ def test_le_balayage_ignore_un_domaine_suspendu(deux_domaines, monkeypatch):
 
 
 def test_le_balayage_est_idempotent(deux_domaines, monkeypatch):
-    monkeypatch.setattr(tasks.notify_alert, "delay", lambda *a, **k: None)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
 
     tasks.sweep_alerts()
     tasks.sweep_alerts()
@@ -155,12 +181,29 @@ def test_un_webhook_en_panne_ne_casse_pas_le_balayage(deux_domaines, monkeypatch
     def _explose(*a, **k):
         raise RuntimeError("redis indisponible")
 
-    monkeypatch.setattr(tasks.notify_alert, "delay", _explose)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", _explose)
 
     tasks.sweep_alerts()                   # ne doit pas lever
 
     for tid in deux_domaines:
         assert len(_alertes(tid)) == 1     # l'alerte est bien en base
+
+
+def test_le_rattrapage_n_ajoute_pas_deux_fois_une_alerte_fraichement_ouverte(
+        deux_domaines, monkeypatch):
+    """Une alerte tout juste ouverte CE cycle a, par construction, `opened_notified_at`
+    encore NULL au moment où le rattrapage regarde la base -- sans garde de
+    déduplication à l'ENFILEMENT, elle serait enfilée deux fois dans le même batch (une
+    fois comme « fraîche », une fois comme « rattrapée »). Les gardes de
+    `notify_alerts` empêchent le double ENVOI de toute façon, mais mieux vaut ne pas
+    produire un batch qui prétend qu'un même événement s'est produit deux fois."""
+    evenements = []
+    monkeypatch.setattr(tasks.notify_alerts, "delay", evenements.extend)
+
+    tasks.sweep_alerts()
+
+    ids = [alert_id for (_event, alert_id) in evenements]
+    assert len(ids) == len(set(ids))
 
 
 # ---------------------------------------------------------------- ordre de notification
@@ -223,15 +266,25 @@ def test_une_aggravation_de_severite_notifie_la_fermeture_avant_l_ouverture(
     webhook (n8n, un script) qui suit une alerte par (kind, dedup_key) verrait "ouverte
     (critical)" PUIS "fermée (warning)", et conclurait à tort que le problème est résolu
     -- alors qu'il vient de s'aggraver et que du courrier est refusé. La fermeture doit
-    partir EN PREMIER."""
-    evenements = []
-    monkeypatch.setattr(tasks.notify_alert, "delay",
-                        lambda event, alert_id: evenements.append(event))
+    partir EN PREMIER.
+
+    Ce test prouve l'ordre de LIVRAISON, pas seulement d'ENFILEMENT : on ne moque plus
+    `notify_alerts.delay` par un simple enregistreur d'ordre d'appel -- `.delay()` a
+    besoin d'un broker Redis, indisponible sous `docker compose run --no-deps`, donc on
+    le remplace par un appel DIRECT à la tâche (un `@celery.task` reste un callable
+    Python ordinaire, cf. les tests `notify_alerts(...)` plus bas). C'est le VRAI corps
+    de `notify_alerts`, avec sa boucle séquentielle, qui s'exécute ici. Seul le POST
+    final (`webhook.envoyer`) est simulé.
+    """
+    appels = []
+    monkeypatch.setattr(tasks.webhook, "envoyer",
+                        lambda event, alerte, tenant: appels.append(event) or True)
+    monkeypatch.setattr(tasks.notify_alerts, "delay", tasks.notify_alerts)
 
     _rapport_tls(domaine_tls)
     tasks.reconcile_tenant(domaine_tls)          # ouvre tls_failure en warning (testing)
-    assert evenements == ["opened"]
-    evenements.clear()
+    assert appels == ["opened"]
+    appels.clear()
 
     with get_session() as db:
         db.get(Tenant, domaine_tls).mta_sts_mode = "enforce"
@@ -239,10 +292,58 @@ def test_une_aggravation_de_severite_notifie_la_fermeture_avant_l_ouverture(
 
     tasks.reconcile_tenant(domaine_tls)          # aggravation : ferme le warning, ouvre le critical
 
-    assert evenements == ["closed", "opened"]
+    assert appels == ["closed", "opened"]
 
 
-# ---------------------------------------------------------------------- notify_alert
+def test_le_balayage_rattrape_une_ouverture_jamais_notifiee(deux_domaines, monkeypatch):
+    """Le filet de rattrapage (tâche 2) : une alerte ouverte en base dont la
+    notification s'est perdue (Redis en panne au `.delay`, retries épuisés, ou worker
+    tué entre le commit et l'enfilement) doit être RENVOYÉE au balayage suivant.
+
+    Le réconciliateur seul ne répare rien : la condition qu'il regarde est déjà
+    ouverte, il passe son chemin (`continue` dans `reconcile()`), l'alerte ne
+    réapparaît plus jamais dans `res.opened`. On simule la perte en ouvrant l'alerte
+    « à la main », sans passer par `reconcile_tenant` -- `opened_notified_at` reste
+    donc NULL, exactement comme si sa notification avait été perdue.
+    """
+    tid_a, _tid_b = deux_domaines
+    with get_session() as db:
+        a = Alert(tenant_id=tid_a, kind="never_reported", dedup_key="", severity="critical",
+                  payload={"domain": "perdue"}, opened_at=datetime.now(timezone.utc))
+        db.add(a)
+        db.commit()
+        aid = str(a.id)
+
+    evenements = []
+    monkeypatch.setattr(tasks.notify_alerts, "delay", evenements.extend)
+
+    tasks.sweep_alerts()
+
+    assert ("opened", aid) in evenements
+
+
+def test_le_balayage_rattrape_une_fermeture_jamais_notifiee(deux_domaines, monkeypatch):
+    """Symétrique : une alerte déjà FERMÉE en base, dont la fermeture n'a jamais été
+    notifiée, doit elle aussi repartir au balayage suivant."""
+    tid_a, _tid_b = deux_domaines
+    maintenant = datetime.now(timezone.utc)
+    with get_session() as db:
+        a = Alert(tenant_id=tid_a, kind="never_reported", dedup_key="", severity="critical",
+                  payload={"domain": "perdue"}, opened_at=maintenant,
+                  opened_notified_at=maintenant, closed_at=maintenant)
+        db.add(a)
+        db.commit()
+        aid = str(a.id)
+
+    evenements = []
+    monkeypatch.setattr(tasks.notify_alerts, "delay", evenements.extend)
+
+    tasks.sweep_alerts()
+
+    assert ("closed", aid) in evenements
+
+
+# ---------------------------------------------------------------------- notify_alerts
 @pytest.fixture
 def un_tenant():
     with get_session() as db:
@@ -260,9 +361,11 @@ def un_tenant():
 
 
 def _cree_alerte(tid: str, **kwargs) -> str:
+    defaults = dict(kind="never_reported", dedup_key="", severity="critical",
+                    payload={"domain": "x.test"})
+    defaults.update(kwargs)
     with get_session() as db:
-        a = Alert(tenant_id=tid, kind="never_reported", dedup_key="", severity="critical",
-                  payload={"domain": "x.test"}, **kwargs)
+        a = Alert(tenant_id=tid, **defaults)
         db.add(a)
         db.commit()
         return str(a.id)
@@ -278,7 +381,7 @@ def test_une_ouverture_deja_notifiee_ne_repart_pas(un_tenant, monkeypatch):
 
     aid = _cree_alerte(un_tenant, opened_notified_at=datetime.now(timezone.utc))
 
-    tasks.notify_alert("opened", aid)
+    tasks.notify_alerts([("opened", aid)])
 
     assert appels == []
 
@@ -294,7 +397,7 @@ def test_une_fermeture_part_meme_si_l_ouverture_a_deja_ete_notifiee(un_tenant, m
     now = datetime.now(timezone.utc)
     aid = _cree_alerte(un_tenant, opened_notified_at=now, closed_at=now)
 
-    tasks.notify_alert("closed", aid)
+    tasks.notify_alerts([("closed", aid)])
 
     assert appels == ["closed"]
     with get_session() as db:
@@ -312,12 +415,12 @@ def test_une_fermeture_deja_notifiee_ne_repart_pas(un_tenant, monkeypatch):
     aid = _cree_alerte(un_tenant, opened_notified_at=now, closed_at=now,
                        closed_notified_at=now)
 
-    tasks.notify_alert("closed", aid)
+    tasks.notify_alerts([("closed", aid)])
 
     assert appels == []
 
 
-def test_notify_alert_tenant_supprime_ne_casse_pas(monkeypatch):
+def test_notify_alerts_tenant_supprime_ne_casse_pas(monkeypatch):
     """Le tenant peut disparaître entre l'ouverture d'une alerte et l'envoi (différé, ou
     rejoué) de sa notification. Garde symétrique à celle qui existe déjà pour l'alerte
     introuvable : on abandonne silencieusement, on ne casse jamais la tâche Celery pour
@@ -345,6 +448,37 @@ def test_notify_alert_tenant_supprime_ne_casse_pas(monkeypatch):
     appels = []
     monkeypatch.setattr(tasks.webhook, "envoyer", lambda *a, **k: appels.append(a) or True)
 
-    tasks.notify_alert("opened", "peu-importe")     # ne doit pas lever
+    tasks.notify_alerts([("opened", "peu-importe")])     # ne doit pas lever
 
     assert appels == []
+
+
+def test_un_evenement_de_notification_inconnu_leve(un_tenant):
+    """Avant : un `else` attrapait tout ce qui n'était pas `"opened"` et l'écrivait dans
+    `closed_notified_at` -- un troisième type d'événement s'y serait écrit en silence.
+    Maintenant : `opened` / `closed` sont traités explicitement, tout le reste lève."""
+    aid = _cree_alerte(un_tenant)
+
+    with pytest.raises(ValueError):
+        tasks.notify_alerts([("mutated", aid)])
+
+
+def test_rejouer_notify_alerts_ne_renvoie_pas_ce_qui_est_deja_notifie(un_tenant, monkeypatch):
+    """Preuve, pas affirmation : le commentaire de `notify_alerts` dit que rejouer la
+    tâche ENTIÈRE est sans danger, parce que les gardes d'idempotence protègent chaque
+    événement individuellement. Ce test l'exerce : sur un batch de deux événements dont
+    le premier est déjà notifié (comme après un rejeu partiel), seul le second doit
+    réellement partir sur le webhook."""
+    appels = []
+    monkeypatch.setattr(tasks.webhook, "envoyer",
+                        lambda event, alerte, tenant: appels.append(event) or True)
+
+    deja = _cree_alerte(un_tenant, dedup_key="deja",
+                        opened_notified_at=datetime.now(timezone.utc))
+    neuve = _cree_alerte(un_tenant, dedup_key="neuve")
+
+    tasks.notify_alerts([("opened", deja), ("opened", neuve)])
+
+    assert appels == ["opened"]           # un seul envoi réel : celui de `neuve`
+    with get_session() as db:
+        assert db.get(Alert, neuve).opened_notified_at is not None

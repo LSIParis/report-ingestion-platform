@@ -179,7 +179,9 @@ class Alert(Base):
     # Deux colonnes, pas une : une alerte est notifiée deux fois LÉGITIMEMENT dans sa
     # vie (ouverture, puis fermeture) -- une seule colonne ne pourrait pas distinguer
     # les deux et servir de garde contre le rejeu Celery (`task_acks_late=True`,
-    # voir `notify_alert`). Migration 0008.
+    # voir `notify_alerts`). Migration 0008. Ces colonnes servent aussi de filet de
+    # rattrapage : `sweep_alerts` renfile toute alerte ouverte/fermée jamais notifiée
+    # (voir `reconcile_tenant`).
     opened_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

@@ -128,69 +128,161 @@ def reconcile_tenant(tenant_id: str) -> None:
         if not tenant or tenant.status != "active":
             return
         res = reconcile(db, tenant)
-        # Les ids doivent être lus AVANT la fermeture de la session.
-        # Fermetures AVANT ouvertures : un changement de sévérité (voir reconciler.py)
-        # ferme l'ancienne alerte et en ouvre une neuve DANS LE MÊME CYCLE -- même kind,
-        # même dedup_key, juste une sévérité différente. Si on notifiait l'ouverture en
-        # premier, un consommateur naïf du webhook (n8n, un script) qui suit une alerte
-        # par (kind, dedup_key) verrait « ouverte (critical) » PUIS « fermée (warning) »,
-        # et conclurait à tort que le problème est résolu -- alors qu'il vient de
-        # s'aggraver et que du courrier est refusé. Fermer d'abord dit l'aggravation
-        # dans le bon ordre.
-        evenements = ([("closed", str(a.id)) for a in res.closed]
-                      + [("opened", str(a.id)) for a in res.opened])
 
-    # Notifier APRÈS le commit : on ne notifie que ce qui est réellement en base.
-    for event, alert_id in evenements:
+        # Les ids déjà retenus CE cycle -- sert à ne pas les reprendre deux fois via le
+        # rattrapage ci-dessous (une alerte fraîchement ouverte/fermée a, par
+        # construction, ses colonnes *_notified_at encore NULL au moment où on regarde).
+        deja_pris = ({str(a.id) for a in res.closed} | {str(a.id) for a in res.opened})
+
+        # --- Rattrapage des notifications perdues -----------------------------------
+        # Les colonnes `opened_notified_at` / `closed_notified_at` (migration 0008)
+        # jouaient jusqu'ici UN rôle : garde d'idempotence contre le rejeu Celery
+        # (`task_acks_late=True`). Elles en jouent maintenant un SECOND, tout aussi
+        # nécessaire : filet de rattrapage. Trois chemins font qu'une alerte s'ouvre en
+        # base SANS que personne ne soit jamais prévenu -- et aucun n'est rattrapé par
+        # le réconciliateur seul :
+        #   - `notify_alerts.delay(...)` lève (Redis indisponible) -> journalisé, puis
+        #     abandonné ;
+        #   - les retries Celery sont épuisés (webhook durablement en panne) -> la
+        #     tâche meurt ;
+        #   - le worker est tué entre le commit de l'alerte et l'enfilement de sa
+        #     notification -> aucune tâche n'a jamais existé.
+        # Le cycle suivant ne répare rien tout seul : `reconcile()` voit la condition
+        # déjà ouverte et passe son chemin (`continue`), l'alerte ne réapparaît plus
+        # JAMAIS dans `res.opened`. Sans ce filet, une alerte ouverte que personne ne
+        # voit jamais est exactement la panne que ce système existe pour combattre.
+        # Sans risque de doublon : `notify_alerts` (plus bas) est gardée par ces mêmes
+        # colonnes, donc redemander une notification déjà envoyée est un no-op.
+        fermetures_manquees = (
+            db.query(Alert)
+            .filter(Alert.closed_at.isnot(None), Alert.closed_notified_at.is_(None))
+            .all()
+        )
+        ouvertures_manquees = (
+            db.query(Alert)
+            .filter(Alert.closed_at.is_(None), Alert.opened_notified_at.is_(None))
+            .all()
+        )
+
+        # Fermetures AVANT ouvertures, y compris pour le rattrapage : un changement de
+        # sévérité (voir reconciler.py) ferme l'ancienne alerte et en ouvre une neuve
+        # DANS LE MÊME CYCLE -- même kind, même dedup_key, juste une sévérité
+        # différente. Si on notifiait l'ouverture en premier, un consommateur naïf du
+        # webhook (n8n, un script) qui suit une alerte par (kind, dedup_key) verrait
+        # « ouverte (critical) » PUIS « fermée (warning) », et conclurait à tort que le
+        # problème est résolu -- alors qu'il vient de s'aggraver et que du courrier est
+        # refusé. Fermer d'abord dit l'aggravation dans le bon ordre. Les ids doivent
+        # être lus AVANT la fermeture de la session.
+        evenements = (
+            [("closed", str(a.id)) for a in res.closed]
+            + [("closed", str(a.id)) for a in fermetures_manquees
+               if str(a.id) not in deja_pris]
+            + [("opened", str(a.id)) for a in res.opened]
+            + [("opened", str(a.id)) for a in ouvertures_manquees
+               if str(a.id) not in deja_pris]
+        )
+
+    # Notifier APRÈS le commit : on ne notifie que ce qui est réellement en base. UNE
+    # SEULE tâche Celery pour tout le cycle (voir `notify_alerts`) -- Celery ne garantit
+    # l'ordre qu'à l'ENFILEMENT, jamais à la LIVRAISON : deux `.delay()` indépendants
+    # peuvent s'exécuter en parallèle (worker prefork) ou être inversés par un retry, ce
+    # qui inverserait GARANTIE l'ordre fermeture/ouverture ci-dessus si on les enfilait
+    # séparément.
+    if evenements:
         try:
-            notify_alert.delay(event, alert_id)
+            notify_alerts.delay(evenements)
         except Exception:  # noqa: BLE001 — le canal ne casse JAMAIS le flux métier
-            log.exception("alerting.notification_non_planifiee",
-                          alert_event=event, alert_id=alert_id)
+            log.exception("alerting.notification_non_planifiee", evenements=evenements)
 
 
 @celery.task(bind=True, max_retries=5, default_retry_delay=60)
-def notify_alert(self, event: str, alert_id: str) -> None:
-    """Envoie une alerte sur le webhook. Retenté par Celery si le canal est en panne.
+def notify_alerts(self, events: list[tuple[str, str]]) -> None:
+    """Envoie TOUS les événements d'un cycle de réconciliation, dans l'ordre, DANS UNE
+    SEULE tâche Celery.
 
-    L'alerte reste ouverte en base quoi qu'il arrive : un canal indisponible fait perdre
-    une NOTIFICATION, jamais une ALERTE.
+    Pourquoi une seule tâche et pas N tâches indépendantes : l'ordre « fermeture avant
+    ouverture » n'est garanti qu'à l'ENFILEMENT (`reconcile_tenant` enfile bien dans le
+    bon ordre), jamais à la LIVRAISON. Deux tâches Celery indépendantes dans la même
+    file peuvent être exécutées en parallèle par un worker prefork (plusieurs
+    processus), et si la fermeture échoue et part en retry (60 s plus tard) pendant que
+    l'ouverture est déjà partie, l'inversion est GARANTIE. Un consommateur du webhook
+    (n8n, un script) qui suit une alerte par (kind, dedup_key) verrait alors « ouverte
+    (critical) » PUIS « fermée (warning) » et conclurait à tort que le problème est
+    résolu -- alors qu'il vient de s'aggraver. Traiter la liste en séquence, à
+    l'intérieur d'une seule tâche, élimine la course : aucune tâche indépendante ne peut
+    en doubler une autre.
+
+    On s'ARRÊTE au premier échec (`WebhookIndisponible`) plutôt que de continuer sur les
+    événements suivants : continuer ferait exactement repartir le bug qu'on corrige (une
+    ouverture partirait avant qu'une fermeture, retentée plus tard, n'ait pu partir).
+    Toute la tâche est retentée par Celery, reprenant la liste depuis le début.
+
+    Cette tâche reste retentable SANS DANGER : chaque paire (event, alert_id) est
+    protégée par sa propre garde d'idempotence (`opened_notified_at` /
+    `closed_notified_at`, déjà en base). Si la tâche est retentée après avoir notifié
+    les 3 premiers événements sur 5, les 3 premiers sont des no-op (déjà notifiés) et
+    seuls les 2 restants repartent réellement sur le webhook -- rejouer la tâche
+    ENTIÈRE est donc sans danger. Vérifié par
+    `test_rejouer_notify_alerts_ne_renvoie_pas_ce_qui_est_deja_notifie`.
     """
     with get_session() as db:            # tâche système : lecture cross-tenant assumée
-        alerte = db.get(Alert, alert_id)
-        if not alerte:
-            return
-        tenant = db.get(Tenant, alerte.tenant_id)
-        if not tenant:
-            # Le tenant peut avoir disparu entre l'ouverture de l'alerte et l'envoi de
-            # sa notification (tâche différée, ou rejouée bien plus tard) -- garde
-            # symétrique à celle du dessus pour l'alerte introuvable : on abandonne
-            # silencieusement, on ne casse jamais la tâche Celery pour ça.
-            return
+        for event, alert_id in events:
+            try:
+                _notifier_un_evenement(db, event, alert_id)
+            except webhook.WebhookIndisponible as exc:
+                raise self.retry(exc=exc)  # noqa: B904 — retry Celery
 
-        # Idempotence : `task_acks_late=True` (app/celery_app.py) => livraison Celery
-        # AT-LEAST-ONCE. Un worker tué après l'envoi mais avant l'acquittement REJOUE la
-        # tâche -- sans garde, la même notification repartirait deux fois sur le
-        # webhook. Une alerte est notifiée deux fois LÉGITIMEMENT dans sa vie (à son
-        # ouverture, puis à sa fermeture) : une seule colonne ne peut pas distinguer les
-        # deux, d'où deux colonnes dédiées (migration 0008), chacune la garde de SON
-        # événement.
-        deja_notifiee = (alerte.opened_notified_at if event == "opened"
-                        else alerte.closed_notified_at)
-        if deja_notifiee is not None:
-            return
 
-        try:
-            envoye = webhook.envoyer(event, alerte, tenant)
-        except webhook.WebhookIndisponible as exc:
-            raise self.retry(exc=exc)    # noqa: B904 — retry Celery
-        if envoye:
-            now = datetime.now(timezone.utc)
-            if event == "opened":
-                alerte.opened_notified_at = now
-            else:
-                alerte.closed_notified_at = now
-            db.commit()
+def _notifier_un_evenement(db, event: str, alert_id: str) -> None:
+    """Traite UN événement (garde d'idempotence + POST + marquage). Appelé en séquence
+    par `notify_alerts` pour chaque événement d'un cycle -- factorisé pour que la boucle
+    ci-dessus reste lisible et que l'arrêt au premier échec soit explicite.
+
+    Idempotence RÉELLE mais PAS STRICTE : la garde est vérifiée AVANT le POST, et la
+    colonne *_notified_at n'est commit qu'APRÈS. Un worker tué entre les deux renverra
+    donc la même notification au rejeu -- un doublon, jamais une perte. C'est un choix
+    assumé (voir `webhook.py`) : un doublon sur un webhook coûte moins cher qu'une
+    alerte jamais vue.
+    """
+    alerte = db.get(Alert, alert_id)
+    if not alerte:
+        return
+    tenant = db.get(Tenant, alerte.tenant_id)
+    if not tenant:
+        # Le tenant peut avoir disparu entre l'ouverture de l'alerte et l'envoi de
+        # sa notification (tâche différée, ou rejouée bien plus tard) -- garde
+        # symétrique à celle du dessus pour l'alerte introuvable : on abandonne
+        # silencieusement, on ne casse jamais la tâche Celery pour ça.
+        return
+
+    # Explicite plutôt qu'un `else` fourre-tout : un troisième type d'événement, un
+    # jour, doit lever bruyamment plutôt que s'écrire en silence dans
+    # `closed_notified_at` (c'est ce que faisait l'ancien `else`).
+    if event == "opened":
+        deja_notifiee = alerte.opened_notified_at
+    elif event == "closed":
+        deja_notifiee = alerte.closed_notified_at
+    else:
+        raise ValueError(f"événement d'alerte inconnu : {event!r}")
+
+    # Idempotence : `task_acks_late=True` (app/celery_app.py) => livraison Celery
+    # AT-LEAST-ONCE. Un worker tué après l'envoi mais avant l'acquittement REJOUE la
+    # tâche -- sans garde, la même notification repartirait deux fois sur le
+    # webhook. Une alerte est notifiée deux fois LÉGITIMEMENT dans sa vie (à son
+    # ouverture, puis à sa fermeture) : une seule colonne ne peut pas distinguer les
+    # deux, d'où deux colonnes dédiées (migration 0008), chacune la garde de SON
+    # événement.
+    if deja_notifiee is not None:
+        return
+
+    envoye = webhook.envoyer(event, alerte, tenant)   # peut lever WebhookIndisponible
+    if envoye:
+        now = datetime.now(timezone.utc)
+        if event == "opened":
+            alerte.opened_notified_at = now
+        else:
+            alerte.closed_notified_at = now
+        db.commit()
 
 
 # ---------------- helpers ----------------
