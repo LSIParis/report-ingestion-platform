@@ -129,8 +129,16 @@ def reconcile_tenant(tenant_id: str) -> None:
             return
         res = reconcile(db, tenant)
         # Les ids doivent être lus AVANT la fermeture de la session.
-        evenements = ([("opened", str(a.id)) for a in res.opened]
-                      + [("closed", str(a.id)) for a in res.closed])
+        # Fermetures AVANT ouvertures : un changement de sévérité (voir reconciler.py)
+        # ferme l'ancienne alerte et en ouvre une neuve DANS LE MÊME CYCLE -- même kind,
+        # même dedup_key, juste une sévérité différente. Si on notifiait l'ouverture en
+        # premier, un consommateur naïf du webhook (n8n, un script) qui suit une alerte
+        # par (kind, dedup_key) verrait « ouverte (critical) » PUIS « fermée (warning) »,
+        # et conclurait à tort que le problème est résolu -- alors qu'il vient de
+        # s'aggraver et que du courrier est refusé. Fermer d'abord dit l'aggravation
+        # dans le bon ordre.
+        evenements = ([("closed", str(a.id)) for a in res.closed]
+                      + [("opened", str(a.id)) for a in res.opened])
 
     # Notifier APRÈS le commit : on ne notifie que ce qui est réellement en base.
     for event, alert_id in evenements:
@@ -153,12 +161,35 @@ def notify_alert(self, event: str, alert_id: str) -> None:
         if not alerte:
             return
         tenant = db.get(Tenant, alerte.tenant_id)
+        if not tenant:
+            # Le tenant peut avoir disparu entre l'ouverture de l'alerte et l'envoi de
+            # sa notification (tâche différée, ou rejouée bien plus tard) -- garde
+            # symétrique à celle du dessus pour l'alerte introuvable : on abandonne
+            # silencieusement, on ne casse jamais la tâche Celery pour ça.
+            return
+
+        # Idempotence : `task_acks_late=True` (app/celery_app.py) => livraison Celery
+        # AT-LEAST-ONCE. Un worker tué après l'envoi mais avant l'acquittement REJOUE la
+        # tâche -- sans garde, la même notification repartirait deux fois sur le
+        # webhook. Une alerte est notifiée deux fois LÉGITIMEMENT dans sa vie (à son
+        # ouverture, puis à sa fermeture) : une seule colonne ne peut pas distinguer les
+        # deux, d'où deux colonnes dédiées (migration 0008), chacune la garde de SON
+        # événement.
+        deja_notifiee = (alerte.opened_notified_at if event == "opened"
+                        else alerte.closed_notified_at)
+        if deja_notifiee is not None:
+            return
+
         try:
             envoye = webhook.envoyer(event, alerte, tenant)
         except webhook.WebhookIndisponible as exc:
             raise self.retry(exc=exc)    # noqa: B904 — retry Celery
         if envoye:
-            alerte.notified_at = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            if event == "opened":
+                alerte.opened_notified_at = now
+            else:
+                alerte.closed_notified_at = now
             db.commit()
 
 

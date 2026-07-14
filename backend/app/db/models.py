@@ -176,7 +176,12 @@ class Alert(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
                                                 server_default=func.now())
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Deux colonnes, pas une : une alerte est notifiée deux fois LÉGITIMEMENT dans sa
+    # vie (ouverture, puis fermeture) -- une seule colonne ne pourrait pas distinguer
+    # les deux et servir de garde contre le rejeu Celery (`task_acks_late=True`,
+    # voir `notify_alert`). Migration 0008.
+    opened_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditLog(Base):
