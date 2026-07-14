@@ -154,3 +154,46 @@ def test_refresh_sur_ip_inconnue_donne_404(client_du_tenant):
 def test_ip_syntaxiquement_invalide_donne_400(client_du_tenant):
     client, _ = client_du_tenant
     assert client.get("/ip-intel/pas-une-ip").status_code == 400
+
+
+@pytest.fixture
+def ligne_tls(tenant_avec_ligne_dmarc):
+    """Une ligne d'échec TLS portant une IP qu'aucune ligne DMARC ne connaît."""
+    tid, _, rep_id = tenant_avec_ligne_dmarc
+    with get_session() as db:
+        db.add(ReportRow(tenant_id=tid, report_id=rep_id, data={
+            "kind": "failure", "result_type": "certificate-host-mismatch",
+            "sending_mta_ip": "203.0.113.44",
+            "receiving_mx_hostname": "mx-backup.ip-test.example",
+            "failure_sessions": 7, "policy_domain": "ip-test.example",
+            "reporter": "Google Inc.", "report_date": "2026-07-13",
+        }))
+        db.commit()
+    yield "203.0.113.44"
+    with get_session() as db:
+        db.query(ReportRow).filter(
+            ReportRow.data["sending_mta_ip"].astext == "203.0.113.44").delete(
+            synchronize_session=False)
+        db.query(IpIntel).filter_by(ip="203.0.113.44").delete()
+        db.commit()
+
+
+def test_ip_vue_uniquement_en_TLS_est_consultable(client_du_tenant, ligne_tls):
+    """Sans l'extension du contrôle d'appartenance, cette IP donnerait 404 — alors que le
+    tenant la voit dans ses propres rapports."""
+    client, _ = client_du_tenant
+
+    r = client.get(f"/ip-intel/{ligne_tls}")
+
+    assert r.status_code == 200
+
+
+def test_activite_TLS_est_comptee(client_du_tenant, ligne_tls):
+    """Sinon le panneau afficherait « 0 message » sur une IP qui a bel et bien échoué."""
+    client, _ = client_du_tenant
+
+    a = client.get(f"/ip-intel/{ligne_tls}").json()["activity"]
+
+    assert a["messages"] == 0                      # aucune ligne DMARC : c'est vrai
+    assert a["tls_sessions"] == 7
+    assert a["tls_failures"] == {"certificate-host-mismatch": 7}

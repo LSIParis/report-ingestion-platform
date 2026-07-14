@@ -27,6 +27,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 
 from app.auth.deps import get_db
 from app.db.models import IpIntel, ReportRow, Tenant
@@ -42,11 +43,17 @@ FRAICHEUR = timedelta(days=7)
 def _rows_de_cette_ip(db, ip: str) -> list[ReportRow]:
     """Les lignes de rapport où cette IP apparaît — SOUS RLS.
 
+    Deux champs, deux sens : `source_ip` est un expéditeur évalué par DMARC,
+    `sending_mta_ip` un MTA qui a tenté une session TLS. On ne les confond pas — mais une
+    IP qui échoue en TLS mérite la même enquête, et le tenant la voit dans ses rapports :
+    la lui refuser par 404 serait absurde.
+
     Aucun `WHERE tenant_id` applicatif : la session est déjà scopée (CLAUDE.md). Une IP
     vue par un autre tenant ne renverra rien ici, et c'est exactement le but.
     """
     return (db.query(ReportRow)
-              .filter(ReportRow.data["source_ip"].astext == ip)
+              .filter(or_(ReportRow.data["source_ip"].astext == ip,
+                          ReportRow.data["sending_mta_ip"].astext == ip))
               .all())
 
 
@@ -63,9 +70,21 @@ def _activite(rows: list[ReportRow]) -> dict:
     dkim_domains: set[str] = set()
     header_froms: set[str] = set()
     dates: list[str] = []
+    tls_sessions = 0
+    tls_failures: Counter[str] = Counter()
 
     for r in rows:
         d = r.data
+        if d.get("kind") == "failure":
+            n_tls = d.get("failure_sessions") or 0
+            try:
+                n_tls = int(n_tls)
+            except (TypeError, ValueError):
+                n_tls = 0
+            tls_sessions += n_tls
+            if d.get("result_type"):
+                tls_failures[str(d["result_type"])] += n_tls
+            continue
         n = d.get("message_count") or 0
         try:
             n = int(n)
@@ -96,6 +115,8 @@ def _activite(rows: list[ReportRow]) -> dict:
         "spf_domains": sorted(spf_domains),
         "dkim_domains": sorted(dkim_domains),
         "header_froms": sorted(header_froms),
+        "tls_sessions": tls_sessions,
+        "tls_failures": dict(tls_failures),
     }
 
 

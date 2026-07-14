@@ -66,3 +66,33 @@ def test_ip_vue_par_b_est_invisible_de_a(seed_two_tenants):
                 ReportRow.data["source_ip"].astext == "198.51.100.42").delete(
                 synchronize_session=False)
             db.commit()
+
+
+def test_ip_TLS_vue_par_b_est_invisible_de_a(seed_two_tenants):
+    """Même principe que pour une IP DMARC : le contrôle d'appartenance de /ip-intel
+    interroge maintenant DEUX champs. Il doit rester aveugle aux lignes des autres.
+    """
+    from app.db.models import ReportRow
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:
+        rep_b = db.query(Report).filter_by(tenant_id=tid_b).first()
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id,
+                         data={"kind": "failure", "sending_mta_ip": "198.51.100.77",
+                               "result_type": "starttls-not-supported",
+                               "failure_sessions": 9}))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:
+            vues = (db.query(ReportRow)
+                      .filter(ReportRow.data["sending_mta_ip"].astext == "198.51.100.77")
+                      .all())
+            assert vues == [], "A voit une ligne TLS de B"
+    finally:
+        with get_session() as db:
+            db.query(ReportRow).filter(
+                ReportRow.data["sending_mta_ip"].astext == "198.51.100.77").delete(
+                synchronize_session=False)
+            db.commit()
