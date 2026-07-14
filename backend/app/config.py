@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     # --- Observabilité ---
     sentry_dsn: str = ""
 
+    # --- Alertes ---
+    # URL générique : un POST JSON. Aucun couplage à un fournisseur (n8n, un script, un
+    # endpoint à vous). Vide → aucun envoi, mais les alertes s'ouvrent quand même en base
+    # et l'absence d'envoi est JOURNALISÉE. On n'avale jamais une alerte en silence.
+    alert_webhook_url: str = ""
+    # Jours sans le moindre rapport avant de déclarer un domaine silencieux. Un domaine à
+    # très faible trafic peut légitimement passer quelques jours sans rapport : on accepte
+    # ce bruit, délibérément. Un faux positif coûte un coup d'œil ; un faux négatif laisse
+    # un client sans protection pendant des mois.
+    alert_silence_days: int = 4
+    # Délai laissé à un nouveau domaine pour publier son DMARC avant qu'on s'en inquiète.
+    alert_onboarding_grace_days: int = 7
+
     def model_post_init(self, __context) -> None:
         """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""
         import base64
