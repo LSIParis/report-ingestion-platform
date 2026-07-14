@@ -54,7 +54,9 @@ services:
       DATABASE_URL_MIGRATE: postgresql://postgres:postgres@postgres:5432/reports
 
   api:
-    build: ../backend
+    build:
+      context: ../backend
+      target: dev          # pytest + ruff : la stack locale sert aussi à tester
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
       migrate: { condition: service_completed_successfully }

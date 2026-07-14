@@ -32,3 +32,15 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)" || exit 1
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# ---------- Stage 3 : dev (tests, lint) ----------
+# `pytest` et `ruff` sont des outils de développement : ils n'ont rien à faire dans
+# l'image qui tourne en production. Mais sans eux, les deux commandes documentées dans
+# CLAUDE.md — `docker compose exec api pytest` et `ruff check app` — sont impossibles.
+# D'où cet étage : le compose local le vise (`target: dev`), la production s'arrête à
+# `runtime` et reste sans outillage de test.
+FROM runtime AS dev
+USER root
+COPY pyproject.toml ./
+RUN pip install ".[dev]"
+USER appuser
