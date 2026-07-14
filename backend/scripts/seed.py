@@ -1,10 +1,18 @@
 """Seed idempotent : 2 tenants, 3 users, règles. Prouve l'isolation dès le 1er login.
-Usage (dans le conteneur api ou worker) : python -m scripts.seed"""
+Usage (dans le conteneur api ou worker) : python -m scripts.seed
+
+Les tenants sont créés par `ensure_tenant`, comme le font l'API d'administration et
+`scripts.add_tenant`. Ce script les fabriquait auparavant à la main : ils n'avaient donc
+PAS la règle de résolution `domain: <domaine>` que reçoit tout domaine réel, et les
+rapports DMARC comme TLS-RPT partaient tous en quarantaine. Un environnement de
+développement qui ne se comporte pas comme la production ne prouve rien.
+"""
 from sqlalchemy import select
 
 from app.auth.passwords import hash_password
-from app.db.models import AppUser, Tenant, TenantMatchingRule, UserTenant
+from app.db.models import AppUser, TenantMatchingRule, UserTenant
 from app.db.session import get_session
+from app.services.tenants import ensure_tenant
 
 
 def get_or_create(db, model, defaults=None, **keys):
@@ -19,8 +27,8 @@ def get_or_create(db, model, defaults=None, **keys):
 
 def run() -> None:
     with get_session() as db:
-        acme, _ = get_or_create(db, Tenant, domain="acme.com", defaults={"name": "ACME Corp"})
-        globex, _ = get_or_create(db, Tenant, domain="globex.com", defaults={"name": "Globex"})
+        acme, _ = ensure_tenant(db, "acme.com", "ACME Corp")
+        globex, _ = ensure_tenant(db, "globex.com", "Globex")
 
         admin, _ = get_or_create(db, AppUser, email="admin@platform.io",
                                  defaults={"role": "platform_admin",
