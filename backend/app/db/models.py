@@ -153,6 +153,32 @@ class IpIntel(Base):
                                                  server_default=func.now())
 
 
+class Alert(Base):
+    """Une alerte est un ÉTAT, pas un message : elle s'ouvre quand une condition devient
+    vraie, elle se ferme quand la condition disparaît.
+
+    La déduplication n'est donc pas une règle qu'on ajoute — c'est une conséquence du
+    modèle : une condition déjà ouverte n'est pas rouverte, donc pas renotifiée. Et un
+    index unique PARTIEL (`WHERE closed_at IS NULL`, migration 0007) le fait garantir par
+    PostgreSQL : un bug du réconciliateur produit une erreur, jamais un doublon.
+
+    `dedup_key` identifie la condition à l'intérieur d'un `kind` (pour un échec TLS : le
+    triplet type/MTA émetteur/MX visé). Vide quand il n'y a qu'une condition possible par
+    domaine (un domaine est silencieux, ou il ne l'est pas).
+    """
+    __tablename__ = "alert"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    dedup_key: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    severity: Mapped[str] = mapped_column(Text, nullable=False)   # warning | critical
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
