@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     # IP de l'hôte qui sert les politiques MTA-STS (enregistrement A `mta-sts.<domaine>`).
     mta_sts_ip: str = ""
 
+    # --- Résolution DNS de l'enrichissement des IP ---
+    # Serveurs interrogés pour le PTR, l'ASN (Team Cymru) et le SPF. On NE se fie PAS au
+    # résolveur du conteneur : celui de Docker (127.0.0.11) ne relaie pas les requêtes
+    # PTR pour les IP publiques — il répond « NoAnswer ». Le reverse DNS serait donc
+    # toujours vide, et avec lui le FCrDNS : plus aucun expéditeur ne serait identifié,
+    # sans la moindre erreur pour le signaler.
+    dns_resolvers: str = "1.1.1.1,8.8.8.8"
+
     # --- Observabilité ---
     sentry_dsn: str = ""
 

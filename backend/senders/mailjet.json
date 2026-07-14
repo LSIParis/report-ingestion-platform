@@ -1,0 +1,7 @@
+{
+  "key": "mailjet",
+  "name": "Mailjet",
+  "ptr_suffixes": [".mailjet.com"],
+  "spf_include": "spf.mailjet.com",
+  "remediation": "Ajoutez `include:spf.mailjet.com` à votre enregistrement SPF, et publiez la clé DKIM fournie par Mailjet (Account settings → Sender domains)."
+}

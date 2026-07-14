@@ -1,0 +1,7 @@
+{
+  "key": "mailchimp",
+  "name": "Mailchimp",
+  "ptr_suffixes": [".mcsv.net", ".rsgsv.net", ".mcdlv.net"],
+  "spf_include": "servers.mcsv.net",
+  "remediation": "Ajoutez `include:servers.mcsv.net` à votre enregistrement SPF, et suivez la procédure d'authentification de domaine de Mailchimp pour la signature DKIM."
+}

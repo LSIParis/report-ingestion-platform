@@ -1,0 +1,7 @@
+{
+  "key": "google",
+  "name": "Google Workspace",
+  "ptr_suffixes": [".google.com", ".googlemail.com"],
+  "spf_include": "_spf.google.com",
+  "remediation": "Ajoutez `include:_spf.google.com` à votre enregistrement SPF, et activez la signature DKIM dans la console d'administration Google (Applications → Gmail → Authentifier l'e-mail)."
+}

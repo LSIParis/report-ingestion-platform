@@ -1,0 +1,7 @@
+{
+  "key": "amazon_ses",
+  "name": "Amazon SES",
+  "ptr_suffixes": [".amazonses.com"],
+  "spf_include": "amazonses.com",
+  "remediation": "Ajoutez `include:amazonses.com` à votre enregistrement SPF, et publiez les CNAME DKIM (Easy DKIM) générés par la console SES. Attention : cette identification repose sur le PTR `.amazonses.com` — une IP EC2 quelconque n'est PAS Amazon SES."
+}
