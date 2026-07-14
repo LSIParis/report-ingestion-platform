@@ -8,7 +8,7 @@ import gzip
 import io
 import zipfile
 
-from app.parsing.detect import detect_format
+from app.parsing.detect import detect_format, looks_like_report
 
 XML = b"<?xml version='1.0'?><feedback><report_metadata/></feedback>"
 JSON = b'{"organization-name": "Google Inc.", "policies": []}'
@@ -68,3 +68,23 @@ def test_contenu_inexploitable_est_ignore():
 def test_archive_corrompue_est_ignoree_sans_lever():
     # Le worker ne doit pas tomber sur une pièce jointe pourrie.
     assert detect_format(b"\x1f\x8bcasse", "r.gz") is None
+
+
+def test_looks_like_report_vrai_pour_les_extensions_ambigues():
+    # Ces extensions PEUVENT porter un rapport normalisé (DMARC ou TLS-RPT) : une
+    # pièce jointe illisible sous l'une d'elles est une anomalie à tracer.
+    assert looks_like_report("rapport.gz") is True
+    assert looks_like_report("rapport.zip") is True
+    assert looks_like_report("rapport.xml") is True
+    assert looks_like_report("rapport.json") is True
+    assert looks_like_report("piece-jointe") is True  # pas d'extension du tout
+    assert looks_like_report(None) is True  # même absence d'information : ambigu
+
+
+def test_looks_like_report_faux_pour_les_formats_non_ambigus_ou_hors_sujet():
+    # Extension reconnue par ailleurs (tabulaire) ou hors sujet : pas un rapport
+    # normalisé, une pièce illisible sous ces extensions n'est pas une anomalie.
+    assert looks_like_report("notes.txt") is False
+    assert looks_like_report("image.png") is False
+    assert looks_like_report("rapport.csv") is False
+    assert looks_like_report("rapport.pdf") is False

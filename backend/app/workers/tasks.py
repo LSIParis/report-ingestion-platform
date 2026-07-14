@@ -12,7 +12,7 @@ from app.db.session import get_session
 from app.normalization.normalizer import NormalizationService
 from app.normalization.profiles import load_profile, select_profile
 from app.parsing.base import ParseResult
-from app.parsing.detect import detect_format
+from app.parsing.detect import detect_format, looks_like_report
 from app.parsing.guards import guard_report_domain
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
@@ -46,8 +46,8 @@ def process_email(self, email_id: str) -> None:
         audit(actor="system", action="email.tenant_resolved", target_id=email_id,
               tenant_id=match.tenant_id, metadata={"method": match.method})
 
-        sources, infected = _list_sources(email_id, match.tenant_id)
-        if not sources and not infected:
+        sources, infected, unreadable = _list_sources(email_id, match.tenant_id)
+        if not sources and not infected and not unreadable:
             _set_status(email_id, "failed")
             audit(actor="system", action="email.failed", target_id=email_id,
                   tenant_id=match.tenant_id, metadata={"error": "no source"})
@@ -55,6 +55,7 @@ def process_email(self, email_id: str) -> None:
 
         statuses = [_process_source(email_id, match.tenant_id, s) for s in sources]
         statuses += ["failed"] * infected      # chaque PJ infectée compte comme un échec
+        statuses += ["failed"] * unreadable    # idem pour une PJ illisible (déjà tracée)
         final = _aggregate(statuses)
         _set_status(email_id, final)
         audit(actor="system", action="email.processed", target_id=email_id,
@@ -111,9 +112,10 @@ def _tenant_domain(tenant_id: str) -> str | None:
         return t.domain if t else None
 
 
-def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
+def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int, int]:
     """Relit le .eml brut, SCANNE (antivirus) puis extrait les pièces jointes vers
-    S3 + rows Attachment. Renvoie (sources parsables, nb de PJ infectées)."""
+    S3 + rows Attachment. Renvoie (sources parsables, nb de PJ infectées, nb de PJ
+    illisibles mais tracées)."""
     with get_session() as db:
         em = db.get(Email, email_id)
         raw_eml = store.get_default(em.raw_object_key)
@@ -121,6 +123,7 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
     msg: Message = email_lib.message_from_bytes(raw_eml)
     sources: list[dict] = []
     infected = 0
+    unreadable = 0
 
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
@@ -130,13 +133,11 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
             continue
         payload = part.get_payload(decode=True) or b""
 
-        # Le CONTENU décide, pas le nom : `…json.gz` est un rapport TLS, pas du DMARC.
-        fmt = detect_format(payload, filename)
-        if not fmt:
-            continue  # rien d'exploitable → ignoré
-
         # --- Antivirus AVANT tout stockage/parsing ---
-        # VirusFound → on trace et on saute (jamais stocké, jamais parsé).
+        # `detect_format` DÉCOMPRESSE (gzip/zip) pour renifler le contenu : un scan
+        # AVANT cette décompression est donc non négociable — décompresser un flux
+        # hostile non scanné est une forme de parsing (invariant CLAUDE.md).
+        # VirusFound → on trace et on saute (jamais stocké, jamais décompressé).
         # AntivirusUnavailable se propage → retry du worker (fail-safe).
         try:
             antivirus.scan(payload)
@@ -145,6 +146,19 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
                              part.get_content_type(), v.signature)
             infected += 1
             continue
+
+        # Le CONTENU décide, pas le nom : `…json.gz` est un rapport TLS, pas du DMARC.
+        fmt = detect_format(payload, filename)
+        if not fmt:
+            if looks_like_report(filename):
+                # Cette pièce PRÉTEND être un rapport (extension .gz/.zip/.xml/.json,
+                # ou aucune) mais on n'a pas su la lire (archive corrompue, tronquée…) :
+                # ce n'est pas un fichier hors-sujet à ignorer, c'est une anomalie à
+                # tracer — sinon un rapport qui n'arrive jamais disparaît en silence.
+                _record_unreadable(email_id, tenant_id, filename,
+                                   part.get_content_type(), payload)
+                unreadable += 1
+            continue  # extension hors-sujet (.txt, .png…) → ignorée en silence
 
         object_key = f"attachments/{email_id}/{filename}"
         store.put(object_key, payload,
@@ -162,7 +176,7 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
         sources.append({"type": "attachment", "fmt": fmt, "object_key": object_key,
                         "attachment_id": attachment_id, "filename": filename})
 
-    return sources, infected
+    return sources, infected, unreadable
 
 
 def _record_infected(email_id: str, tenant_id: str, filename: str,
@@ -187,6 +201,34 @@ def _record_infected(email_id: str, tenant_id: str, filename: str,
         db.commit()
     audit(actor="system", action="attachment.infected", target_id=email_id,
           tenant_id=tenant_id, metadata={"filename": filename, "signature": signature})
+
+
+def _record_unreadable(email_id: str, tenant_id: str, filename: str,
+                       mime: str | None, payload: bytes) -> None:
+    """Trace une PJ qui RESSEMBLE à un rapport (extension .gz/.zip/.xml/.json, ou
+    aucune) mais qu'on n'a pas su décoder : Attachment stockée (elle n'est PAS
+    dangereuse, contrairement à un virus) + Report échec + parsing_error
+    ATTACHMENT_UNREADABLE — visible dans le dashboard. Calqué sur `_record_infected`."""
+    object_key = f"attachments/{email_id}/{filename}"
+    store.put(object_key, payload, content_type=mime or "application/octet-stream")
+
+    with get_session() as db:
+        att = Attachment(tenant_id=tenant_id, email_id=email_id, filename=filename,
+                         mime_type=mime, format=None,
+                         object_key=object_key, size_bytes=len(payload))
+        db.add(att)
+        db.flush()
+        rep = Report(tenant_id=tenant_id, email_id=email_id, attachment_id=att.id,
+                     source_type="attachment", status="failed", row_count=0)
+        db.add(rep)
+        db.flush()
+        db.add(ParsingError(tenant_id=tenant_id, email_id=email_id, report_id=rep.id,
+                            severity="fatal", code="ATTACHMENT_UNREADABLE",
+                            message=f"Pièce jointe illisible : {filename}",
+                            context={"filename": filename}))
+        db.commit()
+    audit(actor="system", action="attachment.unreadable", target_id=email_id,
+          tenant_id=tenant_id, metadata={"filename": filename})
 
 
 def _set_status(email_id: str, status: str) -> None:

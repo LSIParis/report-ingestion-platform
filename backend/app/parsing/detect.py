@@ -40,6 +40,16 @@ def _ext(filename: str | None) -> str:
     return filename[dot:].lower() if dot >= 0 else ""
 
 
+def looks_like_report(filename: str | None) -> bool:
+    """Cette pièce jointe PRÉTEND-elle être un rapport ? Si oui, ne pas savoir la lire
+    est une ANOMALIE à tracer — pas un fichier à ignorer.
+
+    S'appuie sur le même ensemble d'extensions ambiguës que `detect_format` (DMARC ou
+    TLS-RPT possibles, y compris l'absence d'extension) : un `.txt` ou un `.png` n'a
+    jamais prétendu être un rapport, son illisibilité n'intéresse personne."""
+    return _ext(filename) in _MAYBE_REPORT
+
+
 def detect_format(payload: bytes, filename: str | None) -> str | None:
     """Le format à passer au registre d'adaptateurs, ou None si rien d'exploitable."""
     ext = _ext(filename)
@@ -53,7 +63,12 @@ def detect_format(payload: bytes, filename: str | None) -> str | None:
 
     try:
         content = decompress(payload)
-    except Exception:  # noqa: BLE001 — archive corrompue, tronquée, hostile : on ignore
+    except ValueError:
+        # Contrat TOTAL de `decompress()` (voir compression.py) : elle ne laisse fuir
+        # que `DecompressionTooLarge` ou `ValueError` — archive corrompue, tronquée,
+        # bombe. On ne capture QUE ça : un `Exception` nu masquerait aussi une vraie
+        # régression de programmation dans `compression.py` sous l'étiquette
+        # « format non exploitable », au lieu de remonter et d'être vue.
         return None
 
     # Premier octet significatif : BOM et blancs ne disent rien du format.
