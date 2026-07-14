@@ -5,12 +5,9 @@ import zipfile
 
 import pytest
 
-from app.parsing.adapters.dmarc_adapter import (
-    DecompressionTooLarge,
-    DmarcXmlAdapter,
-    decompress,
-)
+from app.parsing.adapters.dmarc_adapter import DmarcXmlAdapter
 from app.parsing.base import ParseResult
+from app.parsing.compression import DecompressionTooLarge, decompress
 from app.parsing.guards import guard_report_domain
 
 XML = """<?xml version="1.0" encoding="UTF-8"?>

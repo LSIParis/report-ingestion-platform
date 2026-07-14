@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from defusedxml.ElementTree import fromstring
 
 from app.parsing.base import ParseResult, ReportAdapter
-from app.parsing.compression import DecompressionTooLarge, decompress
+from app.parsing.compression import decompress
 from app.parsing.registry import register
 
 
@@ -52,7 +52,11 @@ class DmarcXmlAdapter(ReportAdapter):
     def parse(self, raw: bytes, profile) -> ParseResult:
         try:
             xml = decompress(raw)
-        except (DecompressionTooLarge, ValueError, OSError) as exc:
+        except ValueError as exc:
+            # `DecompressionTooLarge` est une sous-classe de `ValueError` ; le
+            # contrat de `decompress()` (voir compression.py) ne laisse fuir que
+            # `DecompressionTooLarge` ou `ValueError` -- `OSError` n'est jamais
+            # atteignable ici, l'ajouter suggererait un cas que ce contrat exclut.
             return ParseResult(status="failed",
                                errors=[{"code": "DMARC_DECOMPRESS", "message": str(exc),
                                         "severity": "fatal"}])

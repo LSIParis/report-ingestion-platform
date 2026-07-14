@@ -62,14 +62,21 @@ def _decompress(raw: bytes) -> bytes:
         return _bounded_read(gzip.GzipFile(fileobj=io.BytesIO(raw)))
 
     if raw[:2] == b"PK":
-        zf = zipfile.ZipFile(io.BytesIO(raw))
-        with zf as z:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            entries = z.namelist()
+            if not entries:
+                # Distinct du cas ci-dessous : ici l'archive ne contient RIEN, pas
+                # même un fichier hors-sujet. Un message différent évite à
+                # l'exploitant de chercher un .xml/.json qui n'a jamais existé.
+                raise ValueError("archive zip vide")
             # Un rapport (XML pour DMARC, JSON pour TLS-RPT) : on ne devine pas le
             # format d'une entrée d'extension inconnue, on la rejette — dans le doute,
             # on ne traite pas plutôt que de risquer de mal interpréter le contenu.
-            names = [n for n in z.namelist() if n.lower().endswith((".xml", ".json"))]
+            names = [n for n in entries if n.lower().endswith((".xml", ".json"))]
             if not names:
-                raise ValueError("archive zip sans fichier .xml ou .json")
+                raise ValueError(
+                    "archive zip sans fichier .xml ou .json (contenu : "
+                    f"{', '.join(entries)})")
             name = names[0]
             # On se fie à la taille ANNONCÉE pour rejeter tôt, puis on borne quand même
             # la lecture : un en-tête zip peut mentir.
