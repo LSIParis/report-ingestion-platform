@@ -12,6 +12,7 @@ from app.db.session import get_session
 from app.normalization.normalizer import NormalizationService
 from app.normalization.profiles import load_profile, select_profile
 from app.parsing.base import ParseResult
+from app.parsing.detect import detect_format
 from app.parsing.guards import guard_report_domain
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
@@ -26,13 +27,6 @@ import app.parsing.adapters  # noqa: F401
 
 log = structlog.get_logger()
 store = ObjectStore.from_settings(settings)
-
-EXT_TO_FORMAT = {
-    ".csv": "csv", ".xlsx": "xlsx", ".xls": "xlsx", ".pdf": "pdf",
-    # Rapports agrégés DMARC : XML normalisé, livré compressé (.gz chez Google/Yahoo,
-    # .zip chez Microsoft) ou nu. Le contenu réel est vérifié par nombre magique.
-    ".gz": "dmarc_xml", ".zip": "dmarc_xml", ".xml": "dmarc_xml",
-}
 
 
 class TransientError(Exception):
@@ -134,12 +128,12 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int]:
         filename = part.get_filename()
         if not filename:
             continue
-        ext = _ext(filename)
-        fmt = EXT_TO_FORMAT.get(ext)
-        if not fmt:
-            continue  # format non géré → ignoré (traçable via metadata si besoin)
-
         payload = part.get_payload(decode=True) or b""
+
+        # Le CONTENU décide, pas le nom : `…json.gz` est un rapport TLS, pas du DMARC.
+        fmt = detect_format(payload, filename)
+        if not fmt:
+            continue  # rien d'exploitable → ignoré
 
         # --- Antivirus AVANT tout stockage/parsing ---
         # VirusFound → on trace et on saute (jamais stocké, jamais parsé).
@@ -229,8 +223,3 @@ def _cleanup_previous(email_id: str) -> None:
         db.query(Attachment).filter(Attachment.email_id == email_id).delete(
             synchronize_session=False)
         db.commit()
-
-
-def _ext(filename: str) -> str:
-    dot = filename.rfind(".")
-    return filename[dot:].lower() if dot >= 0 else ""
