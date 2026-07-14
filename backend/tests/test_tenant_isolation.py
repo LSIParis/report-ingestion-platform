@@ -3,7 +3,7 @@ Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture E
 """
 import pytest
 
-from app.db.models import Email, Report
+from app.db.models import Email, ParsingError, Report
 from app.db.session import get_session, tenant_scoped_session
 
 
@@ -113,6 +113,28 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
         db.add(rep_b_illisible)
         db.flush()
         rep_b_illisible_id = str(rep_b_illisible.id)
+
+        # ParsingError chez B, du code que la sous-requete EXISTS de
+        # `reports_unreadable` doit justement EXCLURE du compte
+        # (`_CODES_ECARTES_A_JUSTE_TITRE`, voir tls_posture.py). Avant ce correctif,
+        # aucun test bloquant ne semait de ParsingError chez B : une regression qui
+        # romprait la correlation sur `report_id` (ex. un `ParsingError.code.in_(...)`
+        # ecrit SANS la jointure sur `Report.id`, qui rendrait la sous-requete VRAIE
+        # pour n'importe quel rapport des qu'un SEUL ParsingError du bon code existe
+        # QUELQUE PART en base -- y compris chez un autre tenant) ne serait detectee
+        # par aucun test bloquant. Ce semis force cette sous-requete a s'executer sur
+        # des donnees d'un AUTRE tenant que celui qui lit sa posture, exactement le
+        # scenario ou une telle regression se verrait.
+        rep_b_usurpe = Report(tenant_id=tid_b, email_id=rep_b.email_id,
+                              source_type="attachment", status="failed",
+                              profile_id="_default_tlsrpt_json")
+        db.add(rep_b_usurpe)
+        db.flush()
+        db.add(ParsingError(tenant_id=tid_b, email_id=rep_b.email_id,
+                            report_id=rep_b_usurpe.id, severity="fatal",
+                            code="DMARC_DOMAIN_MISMATCH",
+                            message="rapport concernant un autre domaine, rejete"))
+        rep_b_usurpe_id = str(rep_b_usurpe.id)
         db.commit()
 
     try:
@@ -120,13 +142,18 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
             p = posture(db, days=30)
             assert p["sessions_total"] == 0, "A voit des sessions TLS de B"
             assert p["failures"] == [], "A voit les echecs detailles de B"
-            assert p["reports_unreadable"] == 0, "A voit un rapport TLS illisible de B"
+            assert p["reports_unreadable"] == 0, (
+                "A voit un rapport TLS illisible de B, ou la sous-requete EXISTS "
+                "sur ParsingError fuite entre tenants")
     finally:
         with get_session() as db:
+            db.query(ParsingError).filter_by(report_id=rep_b_usurpe_id).delete(
+                synchronize_session=False)
             db.query(ReportRow).filter(
                 ReportRow.data["policy_domain"].astext == "tenant-b-test.com").delete(
                 synchronize_session=False)
-            db.query(Report).filter_by(id=rep_b_illisible_id).delete(
+            db.query(Report).filter(Report.id.in_(
+                [rep_b_illisible_id, rep_b_usurpe_id])).delete(
                 synchronize_session=False)
             db.commit()
 

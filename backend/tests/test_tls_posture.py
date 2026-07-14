@@ -315,6 +315,48 @@ def test_rapport_rejete_par_le_garde_anti_usurpation_ne_bloque_pas_le_feu_vert(t
     assert p["safe_to_enforce"] is True
 
 
+def test_piece_jointe_infectee_ne_bloque_pas_le_feu_vert(tenant_tls):
+    """La boite de collecte est OUVERTE : n'importe qui peut joindre un fichier
+    infecte (un simple EICAR suffit) a un e-mail dont le sujet fait resoudre le
+    tenant. `_record_infected` (`app.workers.tasks`, code VIRUS_DETECTED) n'est
+    MEME PAS garde par `looks_like_report` -- il s'execute avant toute
+    verification d'extension, sur N'IMPORTE quelle piece jointe. Une PJ infectee
+    n'est pas un rapport qu'on n'a pas su lire : c'est un fichier identifie AVEC
+    CERTITUDE et rejete deliberement -- exactement la meme categorie que le
+    rapport ecarte par le garde anti-usurpation (DMARC_DOMAIN_MISMATCH), deja
+    exclu du compte. Sans cette exclusion, un `.png` infecte suffit a priver un
+    tenant de son feu vert pendant toute la fenetre."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-virus-{uuid.uuid4()}",
+                   from_address="attaquant@ailleurs.example", subject="s",
+                   received_at=datetime.now(timezone.utc),
+                   raw_object_key="raw/virus.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        # Comme _record_infected/_record_parsing_failure : profile_id NULL (le
+        # scan antivirus a lieu AVANT detect_format, la nature du fichier n'est
+        # jamais etablie), Report en echec.
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id=None)
+        db.add(rep)
+        db.flush()
+        db.add(ParsingError(tenant_id=tid, email_id=em.id, report_id=rep.id,
+                            severity="fatal", code="VIRUS_DETECTED",
+                            message="Piece jointe infectee : eicar-test-signature"))
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 0, (
+        "une piece jointe infectee ne doit pas bloquer le feu vert")
+    assert p["safe_to_enforce"] is True
+
+
 def test_rapport_illisible_hors_fenetre_nest_pas_compte(tenant_tls):
     """Le garde regarde la fenetre de temps comme le reste de `posture()` : un rapport
     illisible vieux de 90 jours ne doit pas empecher indefiniment le passage en

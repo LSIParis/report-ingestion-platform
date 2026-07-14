@@ -272,13 +272,14 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
   // de succès illisible avec 0 échec RESUME donne sessions_total === 0 alors que des
   // rapports sont bel et bien arrivés (incomplete_rows > 0), et des lignes `failure`
   // peuvent exister même quand leur `summary` a été rejeté par la normalisation
-  // (failures non vide). Un rapport TLS peut aussi n'avoir laissé AUCUNE ligne du tout
-  // (policy-domain illisible → rapport rejeté en bloc avant normalisation) :
-  // reports_unreadable le signale alors que sessions_total/failures/incomplete_rows
-  // restent tous à zéro, puisqu'aucun d'eux ne lit jamais que `report_row`. Dans ces
-  // trois cas, « aucun rapport reçu » est faux et avalerait silencieusement des
-  // échecs, de l'incomplétude, ou un rapport jamais lu. On ne bascule dans la branche
-  // « aucune donnée » que si RIEN de tout cela n'est connu.
+  // (failures non vide). Un rapport (ou une pièce jointe qui prétendait en être un --
+  // on ne sait pas laquelle des deux, voir tls_posture.py) peut aussi n'avoir laissé
+  // AUCUNE ligne du tout (policy-domain illisible → rapport rejeté en bloc avant
+  // normalisation) : reports_unreadable le signale alors que
+  // sessions_total/failures/incomplete_rows restent tous à zéro, puisqu'aucun d'eux ne
+  // lit jamais que `report_row`. Dans ces trois cas, « aucun rapport reçu » est faux et
+  // avalerait silencieusement des échecs, de l'incomplétude, ou un rapport jamais lu.
+  // On ne bascule dans la branche « aucune donnée » que si RIEN de tout cela n'est connu.
   if (
     p.sessions_total === 0 &&
     p.failures.length === 0 &&
@@ -356,20 +357,27 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
         </>
       ) : p.reports_unreadable > 0 ? (
         <>
-          {/* Aucune ligne persistée pour ce(s) rapport(s) : sessions_total, failures et
-              incomplete_rows n'en savent rien, puisqu'ils ne lisent que report_row.
-              "Je n'ai pas su te lire" ne doit jamais se lire "rien à signaler". */}
+          {/* On ne sait PAS que c'était un rapport TLS -- seulement qu'une pièce
+              jointe PRÉTENDAIT en être un (extension .gz/.zip/.xml/.json, ou aucune)
+              et qu'on n'a pas su l'identifier. Ça peut tout aussi bien être un
+              rapport DMARC illisible : profile_id NULL ne distingue pas les deux
+              (voir tls_posture.py). Dire "un rapport TLS reçu" affirmerait une
+              certitude qu'on n'a pas -- exactement ce que ce module promet de ne
+              jamais faire. Idem pour "jamais atteint les chiffres" : un rapport
+              `partial` a, lui, une partie de son contenu qui a réellement compté
+              plus haut -- seule la partie rejetée par le normaliseur ne s'y trouve
+              pas (voir le commentaire de `reports_unreadable` dans tls_posture.py). */}
           <strong>
-            Aucun échec visible, mais {p.reports_unreadable} rapport
-            {plural(p.reports_unreadable)} TLS reçu{plural(p.reports_unreadable)} sur{" "}
-            {p.days} jours n'{p.reports_unreadable > 1 ? "ont" : "a"} pas pu être{" "}
-            {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement.
+            Aucun échec visible, mais {p.reports_unreadable} pièce
+            {plural(p.reports_unreadable)} jointe{plural(p.reports_unreadable)} qui{" "}
+            {p.reports_unreadable > 1 ? "prétendaient" : "prétendait"} être un rapport{" "}
+            {p.reports_unreadable > 1 ? "n'ont" : "n'a"} pas pu être{" "}
+            {p.reports_unreadable > 1 ? "lues" : "lue"} entièrement sur {p.days} jours.
           </strong>{" "}
-          {p.reports_unreadable > 1 ? "Leurs" : "Son"} contenu
-          {plural(p.reports_unreadable)} — échecs éventuels compris — n'
-          {p.reports_unreadable > 1 ? "ont" : "a"} jamais atteint les chiffres
-          ci-dessus : on ne sait donc pas tout, et le passage en mode appliqué ne peut
-          pas être garanti sûr.
+          Tout ou partie {p.reports_unreadable > 1 ? "de leur" : "de son"} contenu
+          {plural(p.reports_unreadable)} — échecs éventuels compris — n'a pas pu être
+          pris en compte dans les chiffres ci-dessus : on ne sait donc pas tout, et le
+          passage en mode appliqué ne peut pas être garanti sûr.
         </>
       ) : (
         <>
@@ -401,15 +409,15 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
         (p.sessions_failed > 0 || p.incomplete_rows > 0 || p.failures.length > 0) && (
         <p className="mt-2">
           <strong>
-            {p.reports_unreadable} rapport{plural(p.reports_unreadable)} TLS reçu
-            {plural(p.reports_unreadable)} n'{p.reports_unreadable > 1 ? "ont" : "a"} pas
-            pu être {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement
+            {p.reports_unreadable} pièce{plural(p.reports_unreadable)} jointe
+            {plural(p.reports_unreadable)} qui{" "}
+            {p.reports_unreadable > 1 ? "prétendaient" : "prétendait"} être un rapport{" "}
+            {p.reports_unreadable > 1 ? "n'ont" : "n'a"} pas pu être{" "}
+            {p.reports_unreadable > 1 ? "lues" : "lue"} entièrement
           </strong>{" "}
-          : {p.reports_unreadable > 1 ? "leurs" : "son"} contenu
-          {plural(p.reports_unreadable)} n'{p.reports_unreadable > 1 ? "ont" : "a"} pas
-          pu être normalisé{plural(p.reports_unreadable)} et n'
-          {p.reports_unreadable > 1 ? "apparaissent" : "apparaît"} dans aucun
-          chiffre ci-dessus, y compris les échecs qu'{p.reports_unreadable > 1 ? "ils" : "il"}{" "}
+          : tout ou partie {p.reports_unreadable > 1 ? "de leur" : "de son"} contenu
+          {plural(p.reports_unreadable)} n'a pas pu être pris en compte dans les
+          chiffres ci-dessus, y compris les échecs qu'{p.reports_unreadable > 1 ? "elles" : "elle"}{" "}
           {p.reports_unreadable > 1 ? "portaient" : "portait"} peut-être. Ce silence
           n'est en aucun cas le signe que tout va bien.
         </p>
