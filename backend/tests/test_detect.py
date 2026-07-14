@@ -78,7 +78,6 @@ def test_looks_like_report_vrai_pour_les_extensions_ambigues():
     assert looks_like_report("rapport.xml") is True
     assert looks_like_report("rapport.json") is True
     assert looks_like_report("piece-jointe") is True  # pas d'extension du tout
-    assert looks_like_report(None) is True  # même absence d'information : ambigu
 
 
 def test_looks_like_report_faux_pour_les_formats_non_ambigus_ou_hors_sujet():

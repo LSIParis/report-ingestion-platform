@@ -40,13 +40,20 @@ def _ext(filename: str | None) -> str:
     return filename[dot:].lower() if dot >= 0 else ""
 
 
-def looks_like_report(filename: str | None) -> bool:
+def looks_like_report(filename: str) -> bool:
     """Cette pièce jointe PRÉTEND-elle être un rapport ? Si oui, ne pas savoir la lire
     est une ANOMALIE à tracer — pas un fichier à ignorer.
 
     S'appuie sur le même ensemble d'extensions ambiguës que `detect_format` (DMARC ou
     TLS-RPT possibles, y compris l'absence d'extension) : un `.txt` ou un `.png` n'a
-    jamais prétendu être un rapport, son illisibilité n'intéresse personne."""
+    jamais prétendu être un rapport, son illisibilité n'intéresse personne.
+
+    Type resserre a `str` (pas `str | None`) : le seul appelant (workers/tasks.py)
+    a deja fait `if not filename: continue` avant d'appeler cette fonction --
+    `filename` n'est donc jamais `None` ici. Garder `None` dans le type aurait
+    maintenu une branche (et un test) qu'aucun chemin de production ne peut
+    exercer ; le type resserre reflete le contrat reel plutot que de s'en garder
+    indefiniment."""
     return _ext(filename) in _MAYBE_REPORT
 
 

@@ -179,15 +179,29 @@ def _list_sources(email_id: str, tenant_id: str) -> tuple[list[dict], int, int]:
     return sources, infected, unreadable
 
 
-def _record_infected(email_id: str, tenant_id: str, filename: str,
-                     mime: str | None, signature: str) -> None:
-    """Trace une PJ infectée : Attachment (NON stockée) + Report échec +
-    parsing_error VIRUS_DETECTED → visible dans le dashboard. Le fichier
-    malveillant n'est jamais écrit dans l'object store."""
+def _record_parsing_failure(*, email_id: str, tenant_id: str, filename: str,
+                            mime: str | None, payload: bytes | None,
+                            code: str, message: str, context: dict,
+                            action: str, metadata: dict) -> None:
+    """Trace une PJ qu'on n'a pas pu exploiter : Attachment + Report(status=failed) +
+    ParsingError + commit + audit -- factorise ce que `_record_infected` et
+    `_record_unreadable` dupliquaient (~20 lignes identiques a l'exception du
+    code/message et d'un choix). `payload=None` -> le fichier n'est PAS ecrit dans
+    l'object store (PJ infectee : jamais stockee, meme pas pour la reparser un
+    jour). `payload` fourni -> il est stocke normalement (PJ illisible, mais pas
+    dangereuse)."""
+    if payload is None:
+        object_key = "(infecté — non stocké)"
+        size_bytes = None
+    else:
+        object_key = f"attachments/{email_id}/{filename}"
+        store.put(object_key, payload, content_type=mime or "application/octet-stream")
+        size_bytes = len(payload)
+
     with get_session() as db:
         att = Attachment(tenant_id=tenant_id, email_id=email_id, filename=filename,
                          mime_type=mime, format=None,
-                         object_key="(infecté — non stocké)", size_bytes=None)
+                         object_key=object_key, size_bytes=size_bytes)
         db.add(att)
         db.flush()
         rep = Report(tenant_id=tenant_id, email_id=email_id, attachment_id=att.id,
@@ -195,12 +209,25 @@ def _record_infected(email_id: str, tenant_id: str, filename: str,
         db.add(rep)
         db.flush()
         db.add(ParsingError(tenant_id=tenant_id, email_id=email_id, report_id=rep.id,
-                            severity="fatal", code="VIRUS_DETECTED",
-                            message=f"Pièce jointe infectée : {signature}",
-                            context={"filename": filename, "signature": signature}))
+                            severity="fatal", code=code, message=message,
+                            context=context))
         db.commit()
-    audit(actor="system", action="attachment.infected", target_id=email_id,
-          tenant_id=tenant_id, metadata={"filename": filename, "signature": signature})
+    audit(actor="system", action=action, target_id=email_id, tenant_id=tenant_id,
+          metadata=metadata)
+
+
+def _record_infected(email_id: str, tenant_id: str, filename: str,
+                     mime: str | None, signature: str) -> None:
+    """Trace une PJ infectée : Attachment (NON stockée) + Report échec +
+    parsing_error VIRUS_DETECTED → visible dans le dashboard. Le fichier
+    malveillant n'est jamais écrit dans l'object store."""
+    _record_parsing_failure(
+        email_id=email_id, tenant_id=tenant_id, filename=filename, mime=mime,
+        payload=None, code="VIRUS_DETECTED",
+        message=f"Pièce jointe infectée : {signature}",
+        context={"filename": filename, "signature": signature},
+        action="attachment.infected",
+        metadata={"filename": filename, "signature": signature})
 
 
 def _record_unreadable(email_id: str, tenant_id: str, filename: str,
@@ -209,26 +236,13 @@ def _record_unreadable(email_id: str, tenant_id: str, filename: str,
     aucune) mais qu'on n'a pas su décoder : Attachment stockée (elle n'est PAS
     dangereuse, contrairement à un virus) + Report échec + parsing_error
     ATTACHMENT_UNREADABLE — visible dans le dashboard. Calqué sur `_record_infected`."""
-    object_key = f"attachments/{email_id}/{filename}"
-    store.put(object_key, payload, content_type=mime or "application/octet-stream")
-
-    with get_session() as db:
-        att = Attachment(tenant_id=tenant_id, email_id=email_id, filename=filename,
-                         mime_type=mime, format=None,
-                         object_key=object_key, size_bytes=len(payload))
-        db.add(att)
-        db.flush()
-        rep = Report(tenant_id=tenant_id, email_id=email_id, attachment_id=att.id,
-                     source_type="attachment", status="failed", row_count=0)
-        db.add(rep)
-        db.flush()
-        db.add(ParsingError(tenant_id=tenant_id, email_id=email_id, report_id=rep.id,
-                            severity="fatal", code="ATTACHMENT_UNREADABLE",
-                            message=f"Pièce jointe illisible : {filename}",
-                            context={"filename": filename}))
-        db.commit()
-    audit(actor="system", action="attachment.unreadable", target_id=email_id,
-          tenant_id=tenant_id, metadata={"filename": filename})
+    _record_parsing_failure(
+        email_id=email_id, tenant_id=tenant_id, filename=filename, mime=mime,
+        payload=payload, code="ATTACHMENT_UNREADABLE",
+        message=f"Pièce jointe illisible : {filename}",
+        context={"filename": filename},
+        action="attachment.unreadable",
+        metadata={"filename": filename})
 
 
 def _set_status(email_id: str, status: str) -> None:
