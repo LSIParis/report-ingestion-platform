@@ -6,6 +6,7 @@ import { RequireAuth } from "./auth/RequireAuth";
 import { TenantProvider, useTenant } from "./auth/tenant";
 import { Layout } from "./components/Layout";
 import { AdminRules } from "./pages/AdminRules";
+import { Alerts } from "./pages/Alerts";
 import { Domains } from "./pages/Domains";
 import { Login } from "./pages/Login";
 import { Metrics } from "./pages/Metrics";
@@ -54,6 +55,7 @@ function TenantScopedApp() {
             <Route path="/quarantine" element={<Quarantine />} />
             <Route path="/admin/domains" element={<Domains />} />
             <Route path="/admin/rules" element={<AdminRules />} />
+            <Route path="/alerts" element={<Alerts />} />
             <Route path="/settings" element={<Settings />} />
           </Route>
         </Route>
