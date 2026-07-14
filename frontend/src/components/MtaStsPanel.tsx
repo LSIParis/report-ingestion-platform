@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError } from "../api/client";
-import { useMtaSts, useSaveMtaSts } from "../api/domains";
+import { type TlsFailure, type TlsPosture, useMtaSts, useSaveMtaSts, useTlsPosture } from "../api/domains";
 
 /* MTA-STS force les serveurs distants à chiffrer le courrier qu'ils envoient vers ce
    domaine, et à vérifier le certificat du MX.
@@ -40,6 +40,7 @@ export function MtaStsPanel({
 }) {
   const q = useMtaSts(tenantId);
   const save = useSaveMtaSts(tenantId);
+  const tls = useTlsPosture(tenantId);
   const [mode, setMode] = useState<string>("");
   const [maxAge, setMaxAge] = useState(86400);
   const [mx, setMx] = useState("");
@@ -97,6 +98,8 @@ export function MtaStsPanel({
             de la négociation et lire le courrier en clair.
           </p>
         </header>
+
+        {tls.data && <TlsVerdict p={tls.data} />}
 
         <fieldset className="space-y-2">
           <legend className="text-xs uppercase tracking-wide text-gray-500">Mode</legend>
@@ -232,4 +235,93 @@ export function MtaStsPanel({
       </form>
     </div>
   );
+}
+
+/* Le verdict TLS se lit JUSTE AVANT le sélecteur de mode, parce que c'est exactement là
+   que se prend la décision qu'il éclaire. Une page séparée qu'il faut penser à ouvrir ne
+   servirait personne.
+
+   Trois états, et le premier est le plus important : ne RIEN savoir n'est pas rassurant.
+   Un domaine silencieux n'est pas un domaine sans échec — c'est un domaine sur lequel on
+   n'a aucune donnée. Le dire autrement ferait durcir à l'aveugle, ce que TLS-RPT sert
+   précisément à éviter. */
+function TlsVerdict({ p }: { p: TlsPosture }) {
+  if (p.sessions_total === 0) {
+    return (
+      <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
+        <strong>Aucun rapport TLS reçu sur {p.days} jours.</strong> On ne sait donc pas si
+        le chiffrement fonctionne — ce n'est pas la même chose que « tout va bien ».
+        Publiez l'enregistrement <code className="font-mono">_smtp._tls</code> (voir la
+        procédure du domaine) avant de durcir, sinon vous durcirez à l'aveugle.
+      </div>
+    );
+  }
+
+  if (p.safe_to_enforce) {
+    return (
+      <div className="rounded border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+        <strong>
+          {p.sessions_ok.toLocaleString("fr-FR")} sessions sur {p.days} jours, toutes
+          chiffrées, aucun échec.
+        </strong>{" "}
+        Le passage en mode appliqué est sûr.
+        {p.reporters.length > 0 && (
+          <span className="block mt-1 text-emerald-800">
+            D'après : {p.reporters.join(", ")}.
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport) : dans
+  // les deux cas, le mode appliqué refuserait potentiellement du courrier légitime. On dit
+  // les deux séparément, sinon un exploitant qui ne voit aucun échec ne comprendra pas
+  // pourquoi le feu vert lui est refusé.
+  return (
+    <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
+      {p.sessions_failed > 0 ? (
+        <strong>
+          {p.sessions_failed.toLocaleString("fr-FR")} session
+          {p.sessions_failed > 1 ? "s" : ""} en échec de chiffrement sur {p.days} jours
+        </strong>
+      ) : (
+        <strong>Aucun échec visible, mais des données incomplètes sur {p.days} jours.</strong>
+      )}{" "}
+      (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). En mode
+      appliqué, ces messages seraient <strong>refusés</strong>. Corrigez d'abord.
+      {p.incomplete_rows > 0 && (
+        <p className="mt-2">
+          <strong>
+            {p.incomplete_rows} ligne{p.incomplete_rows > 1 ? "s" : ""} de résumé
+            incomplète{p.incomplete_rows > 1 ? "s" : ""}
+          </strong>{" "}
+          : un fournisseur a rapporté un résultat sans indiquer combien de sessions il
+          couvrait. Le nombre réel d'échecs peut donc être supérieur à ce qui est affiché
+          ici — on ne peut pas garantir l'exhaustivité.
+        </p>
+      )}
+      {p.failures.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {p.failures.map((f, i) => (
+            <li key={i} className="font-mono">
+              {f.result_type} · {formatFailureSessions(f)}
+              {f.sending_mta_ip && <> · depuis {f.sending_mta_ip}</>}
+              {f.receiving_mx_hostname && <> · vers {f.receiving_mx_hostname}</>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* sessions === null : la magnitude est inconnue (aucune occurrence lisible dans le
+   rapport) — on ne l'affiche JAMAIS comme « 0 session », ce serait rassurant et faux.
+   partial === true : le nombre est un MINORANT, le vrai total peut être plus élevé. */
+function formatFailureSessions(f: TlsFailure): string {
+  if (f.sessions === null) return "nombre de sessions inconnu";
+  const n = f.sessions.toLocaleString("fr-FR");
+  const suffix = f.sessions > 1 ? "s" : "";
+  return f.partial ? `au moins ${n} session${suffix}` : `${n} session${suffix}`;
 }
