@@ -16,6 +16,17 @@ Deux pièges, tous deux mortels, tous deux évités ici :
    « c'est sûr » ferait durcir à l'aveugle — exactement ce que TLS-RPT sert à éviter.
    `safe_to_enforce` exige donc des données ET aucun échec.
 
+ - **Ne pas confondre compteur absent et compteur à zéro.** `failed_sessions` n'est PAS
+   `required` dans le profil de normalisation : un fournisseur peut envoyer un `summary`
+   JSON valide avec `"total-failure-session-count": null` (clé présente, pas de
+   `KeyError`), et la ligne est persistée avec `failed_sessions: null`. Si on lisait ça
+   comme 0, une ligne qui dit littéralement « je ne sais pas combien de sessions ont
+   échoué » serait comptée comme « aucune n'a échoué » — silence pris pour succès, mais
+   au niveau du champ au lieu du domaine. On distingue donc les lignes `summary`
+   complètes (les deux compteurs sont des entiers lisibles, zéro compris) des lignes
+   incomplètes, et `safe_to_enforce` refuse `true` dès qu'il en existe une seule : on ne
+   dit « c'est sûr » que si on a réellement tout lu.
+
 Le service ne connaît pas le tenant : il reçoit une session **déjà scopée**. C'est ce qui
 le rend testable seul et incapable de fuiter — aucun `WHERE tenant_id` applicatif, la RLS
 fait le travail (CLAUDE.md).
@@ -41,6 +52,7 @@ def posture(db, days: int = 30) -> dict:
 
     sessions_ok = 0
     sessions_failed = 0
+    incomplete_rows = 0
     reporters: set[str] = set()
 
     # Un échec est identifié par (type, MTA émetteur, MX visé) : c'est ce triplet qui dit
@@ -54,8 +66,16 @@ def posture(db, days: int = 30) -> dict:
             reporters.add(str(d["reporter"]))
 
         if d.get("kind") == "summary":
-            sessions_ok += _int(d.get("successful_sessions"))
-            sessions_failed += _int(d.get("failed_sessions"))
+            ok = _int_or_none(d.get("successful_sessions"))
+            failed = _int_or_none(d.get("failed_sessions"))
+            if ok is None or failed is None:
+                # Un des deux totaux est absent ou illisible : cette ligne ne dit rien
+                # de fiable. On ne la compte PAS comme 0 échec (voir le commentaire de
+                # module) — elle rend juste `safe_to_enforce` impossible.
+                incomplete_rows += 1
+                continue
+            sessions_ok += ok
+            sessions_failed += failed
             continue
 
         key = (str(d.get("result_type") or "inconnu"),
@@ -77,8 +97,15 @@ def posture(db, days: int = 30) -> dict:
         "sessions_ok": sessions_ok,
         "sessions_failed": sessions_failed,
         "failures": failures,
-        # Des données ET aucun échec. Le silence n'est pas une preuve.
-        "safe_to_enforce": total > 0 and sessions_failed == 0,
+        # Nombre de lignes `summary` dont on n'a PAS pu lire les deux totaux (compteur
+        # absent ou non entier). Exposé tel quel : c'est à l'appelant (l'écran enforce)
+        # de savoir qu'il existe des lignes muettes, pas seulement des échecs à zéro.
+        "incomplete_rows": incomplete_rows,
+        # Des données, aucun échec, ET rien d'illisible. Le silence n'est pas une
+        # preuve — ni au niveau du domaine (aucun rapport), ni au niveau du champ
+        # (un compteur absent dans un rapport reçu). Une seule ligne incomplète suffit
+        # à refuser : on ne dit « c'est sûr » que si on a réellement TOUT lu.
+        "safe_to_enforce": total > 0 and sessions_failed == 0 and incomplete_rows == 0,
         "reporters": sorted(reporters),
     }
 
@@ -88,3 +115,15 @@ def _int(value) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _int_or_none(value) -> int | None:
+    """Comme `_int`, mais distingue « illisible » de « zéro » : `None` en entrée, ou une
+    valeur non castable, renvoie `None` — jamais 0. Réservé aux compteurs des lignes
+    `summary`, les seules dont un silence peut faire basculer `safe_to_enforce`."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

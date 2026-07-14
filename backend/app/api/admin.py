@@ -175,6 +175,12 @@ def tenant_tls_posture(tenant_id: str, days: int = 30):
     par cette route. C'est l'option la plus restrictive, et elle ne coûte rien.
     """
     with tenant_scoped_session(tenant_id=tenant_id) as db:
+        # Aligné sur `get_mta_sts` : un domaine inexistant renvoie 404, pas une posture
+        # à zéro (qui serait indiscernable d'un domaine réel resté silencieux). La table
+        # `tenant` ne porte pas de tenant_id et n'est pas soumise à la RLS (migration
+        # 0002) : cette lecture reste possible dans CETTE session scopée, sans bypass.
+        if not db.get(Tenant, tenant_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
         return posture(db, days=days)
 
 
