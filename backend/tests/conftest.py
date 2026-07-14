@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+import app.parsing.adapters  # noqa: F401 — peuple le registre des adaptateurs pour la
+# session de test, quel que soit le sous-ensemble de fichiers sélectionné. En production,
+# c'est `app.workers.tasks` qui importe ce paquet avant tout parsing ; mais un fichier de
+# test isolé (ex. test_tlsrpt_adapter.py) qui appelle `get_adapter(...)` sans jamais
+# importer `app.workers.tasks` verrait sinon un registre vide.
 from app.db.models import Email, Report, Tenant
 from app.db.session import get_session
 
