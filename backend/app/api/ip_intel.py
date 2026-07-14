@@ -75,6 +75,11 @@ def _activite(rows: list[ReportRow]) -> dict:
 
     for r in rows:
         d = r.data
+        # La période couvre TOUTES les lignes, DMARC comme TLS : collectée avant le
+        # `continue` ci-dessous, sinon une IP vue uniquement en TLS garde une période vide.
+        if d.get("report_date"):
+            dates.append(str(d["report_date"]))
+
         if d.get("kind") == "failure":
             n_tls = d.get("failure_sessions") or 0
             try:
@@ -102,8 +107,6 @@ def _activite(rows: list[ReportRow]) -> dict:
             dkim_domains.add(str(d["auth_dkim"]))
         if d.get("header_from"):
             header_froms.add(str(d["header_from"]))
-        if d.get("report_date"):
-            dates.append(str(d["report_date"]))
 
     return {
         "messages": messages,

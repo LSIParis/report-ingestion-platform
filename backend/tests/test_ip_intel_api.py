@@ -197,3 +197,6 @@ def test_activite_TLS_est_comptee(client_du_tenant, ligne_tls):
     assert a["messages"] == 0                      # aucune ligne DMARC : c'est vrai
     assert a["tls_sessions"] == 7
     assert a["tls_failures"] == {"certificate-host-mismatch": 7}
+    # La ligne TLS porte un report_date valide : la période ne doit pas rester vide.
+    assert a["first_seen"] == "2026-07-13"
+    assert a["last_seen"] == "2026-07-13"
