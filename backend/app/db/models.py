@@ -129,6 +129,30 @@ class ParsingError(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class IpIntel(Base):
+    """Cache des faits DNS sur une IP. SANS tenant_id, délibérément : ce sont des faits
+    publics sur Internet, pas des données de client.
+
+    L'écart à l'invariant n°1 (CLAUDE.md) est compensé ailleurs : l'API ne lit jamais
+    cette table sans avoir d'abord vérifié, SOUS RLS, que l'IP apparaît dans une ligne de
+    rapport visible du tenant. Une IP jamais vue par ce tenant → 404, avant même de
+    toucher au cache. Impossible donc de sonder l'existence d'une IP chez un autre client.
+
+    L'expéditeur reconnu n'est PAS stocké ici : l'appariement avec le catalogue se fait à
+    la lecture, pour qu'une correction du catalogue prenne effet sur tout l'historique
+    sans purge ni rejeu.
+    """
+    __tablename__ = "ip_intel"
+    ip: Mapped[str] = mapped_column(Text, primary_key=True)
+    ptr: Mapped[str | None] = mapped_column(Text)
+    fcrdns: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    asn: Mapped[int | None] = mapped_column(Integer)
+    as_org: Mapped[str | None] = mapped_column(Text)
+    country: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
