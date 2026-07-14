@@ -116,6 +116,7 @@ def test_pas_de_double_comptage(tenant_tls):
     assert p["failures"] == [{
         "result_type": "certificate-host-mismatch",
         "sessions": 3,
+        "partial": False,
         "sending_mta_ip": "203.0.113.5",
         "receiving_mx_hostname": "mx-backup.tls-test.example",
     }]
@@ -183,6 +184,7 @@ def test_echec_sans_nombre_de_sessions_nest_pas_affiche_comme_zero(tenant_tls):
     assert p["failures"] == [{
         "result_type": "certificate-expired",
         "sessions": None,
+        "partial": True,
         "sending_mta_ip": "203.0.113.9",
         "receiving_mx_hostname": "mx.tls-test.example",
     }]
@@ -288,12 +290,97 @@ def test_pas_de_double_comptage_entre_plusieurs_rapports(tenant_tls):
     assert p["failures"] == [{
         "result_type": "certificate-expired",
         "sessions": 7,
+        "partial": False,
         "sending_mta_ip": "203.0.113.9",
         "receiving_mx_hostname": "mx.tls-test.example",
     }]
     assert p["incomplete_rows"] == 0
     assert p["safe_to_enforce"] is False
     assert p["reporters"] == ["Google Inc.", "Microsoft Corp."]
+
+
+def test_minorant_quand_un_rapport_chiffre_et_lautre_muet(tenant_tls):
+    """LE test du correctif. Google chiffre l'échec (3 sessions) sur le triplet
+    (certificate-expired, 203.0.113.5, mx.exemple.fr) ; Microsoft décrit le MÊME
+    triplet mais sans nombre exploitable. Le total interne connu est bien 3 — il ne
+    doit PAS être effacé au profit de `None` sous prétexte qu'une des deux occurrences
+    est illisible. On affiche ce qu'on sait (3) et on dit que c'est un minorant."""
+    tid, rid_google = tenant_tls
+    rid_microsoft = _nouveau_rapport(tid, "Microsoft Corp.")
+
+    _seme_pour(tid, rid_google, "Google Inc.",
+               {"kind": "failure", "result_type": "certificate-expired",
+                "sending_mta_ip": "203.0.113.5",
+                "receiving_mx_hostname": "mx.exemple.fr",
+                "failure_sessions": 3})
+    _seme_pour(tid, rid_microsoft, "Microsoft Corp.",
+               {"kind": "failure", "result_type": "certificate-expired",
+                "sending_mta_ip": "203.0.113.5",
+                "receiving_mx_hostname": "mx.exemple.fr",
+                "failure_sessions": None})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["failures"] == [{
+        "result_type": "certificate-expired",
+        "sessions": 3,          # connu : Google l'a chiffré, on ne le jette pas
+        "partial": True,        # mais Microsoft est muet : 3 est un plancher, pas le total réel
+        "sending_mta_ip": "203.0.113.5",
+        "receiving_mx_hostname": "mx.exemple.fr",
+    }]
+
+
+def test_triplet_entierement_illisible_reste_inconnu(tenant_tls):
+    """Si AUCUNE occurrence du triplet n'est lisible, il n'y a vraiment rien à sommer :
+    `sessions` reste `None`. `partial` reste `True` pour signaler que l'échec existe
+    bel et bien, seule sa taille est inconnue."""
+    tid, rid_google = tenant_tls
+    rid_microsoft = _nouveau_rapport(tid, "Microsoft Corp.")
+
+    _seme_pour(tid, rid_google, "Google Inc.",
+               {"kind": "failure", "result_type": "certificate-expired",
+                "sending_mta_ip": "203.0.113.5",
+                "receiving_mx_hostname": "mx.exemple.fr",
+                "failure_sessions": None})
+    _seme_pour(tid, rid_microsoft, "Microsoft Corp.",
+               {"kind": "failure", "result_type": "certificate-expired",
+                "sending_mta_ip": "203.0.113.5",
+                "receiving_mx_hostname": "mx.exemple.fr",
+                "failure_sessions": None})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["failures"] == [{
+        "result_type": "certificate-expired",
+        "sessions": None,
+        "partial": True,
+        "sending_mta_ip": "203.0.113.5",
+        "receiving_mx_hostname": "mx.exemple.fr",
+    }]
+
+
+def test_magnitude_inconnue_remonte_en_tete_du_tri(tenant_tls):
+    """Le tri par magnitude décroissante ne doit pas reléguer une magnitude INCONNUE en
+    fin de liste, comme si elle était la moins grave : elle est simplement non mesurée,
+    et doit remonter en tête plutôt que se cacher derrière un total connu de 50."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "failure", "result_type": "certificate-expired",
+                     "sending_mta_ip": "203.0.113.5",
+                     "receiving_mx_hostname": "mx-connu.tls-test.example",
+                     "failure_sessions": 50})
+    _seme(tid, rid, {"kind": "failure", "result_type": "certificate-revoked",
+                     "sending_mta_ip": "203.0.113.6",
+                     "receiving_mx_hostname": "mx-inconnu.tls-test.example",
+                     "failure_sessions": None})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert [f["receiving_mx_hostname"] for f in p["failures"]] == [
+        "mx-inconnu.tls-test.example", "mx-connu.tls-test.example",
+    ]
 
 
 # --------------------------------------------------- cohérence de la route

@@ -67,10 +67,14 @@ def posture(db, days: int = 30) -> dict:
     # Un échec est identifié par (type, MTA émetteur, MX visé) : c'est ce triplet qui dit
     # à l'exploitant quoi corriger. Deux rapports différents décrivant le même problème
     # doivent s'additionner, pas se dupliquer.
-    # Valeur : {"total": somme des `failure_sessions` lisibles, "unknown": au moins une
-    # ligne de ce triplet avait un `failure_sessions` illisible}. Un `Counter` ne peut
-    # pas représenter « nombre inconnu » sans mentir avec un 0 — voir `_int_or_none`
-    # plus bas et le commentaire sur `failures`.
+    # Valeur : {"total": somme des `failure_sessions` LISIBLES du triplet, "has_known":
+    # au moins une occurrence lisible (donc `total` est un vrai chiffre, pas un 0
+    # fabriqué), "has_unknown": au moins une occurrence illisible}. Les deux booléens
+    # sont indépendants — un triplet peut être *en partie* lisible — c'est précisément
+    # ce que `has_known`/`has_unknown` distincts permettent de représenter, alors qu'un
+    # simple `Counter` ne peut ni signaler « inconnu » sans un 0 mensonger, ni signaler
+    # « connu MAIS partiel ». Voir `_int_or_none` plus bas et le commentaire sur
+    # `failures`.
     detail: dict[tuple[str, str, str], dict] = {}
 
     for r in rows:
@@ -101,27 +105,45 @@ def posture(db, days: int = 30) -> dict:
         key = (str(d.get("result_type") or "inconnu"),
                str(d.get("sending_mta_ip") or ""),
                str(d.get("receiving_mx_hostname") or ""))
-        entry = detail.setdefault(key, {"total": 0, "unknown": False})
+        entry = detail.setdefault(key, {"total": 0, "has_known": False, "has_unknown": False})
         sessions = _int_or_none(d.get("failure_sessions"))
         if sessions is None:
-            # La ligne `failure` documente un échec RÉEL (elle existe, avec son type,
-            # son MTA, son MX) mais ne dit pas combien de sessions il a touchées.
-            # Le lire comme 0 afficherait « échec avéré, 0 session » à l'écran — un
-            # échec qu'on sait exister deviendrait invisible dans le chiffre, la même
-            # faute que celle corrigée ci-dessus pour les `summary`.
-            # On préfère afficher `sessions: None` (nombre inconnu) plutôt que de
-            # fabriquer un zéro : sans impact sur `safe_to_enforce`, qui ne lit jamais
-            # les lignes `failure` (voir le commentaire de module).
-            entry["unknown"] = True
+            # Cette OCCURRENCE du triplet est illisible — mais d'autres occurrences du
+            # même triplet (un autre fournisseur, un autre jour) peuvent très bien être
+            # lisibles. On ne touche pas à `total` ici : le marquer illisible ne doit
+            # PAS effacer ce que d'autres occurrences ont déjà additionné.
+            entry["has_unknown"] = True
         else:
             entry["total"] += sessions
+            entry["has_known"] = True
 
-    failures = [
-        {"result_type": rt, "sessions": None if v["unknown"] else v["total"],
+    # Arbitrage (même principe que pour les lignes `summary` ci-dessus, appliqué ici à
+    # `failures`) : une version précédente affichait `sessions: None` dès qu'UNE seule
+    # occurrence du triplet était illisible — même si d'autres occurrences avaient un
+    # nombre parfaitement lisible. Exemple réel : Google chiffre 3 sessions sur
+    # (certificate-expired, 203.0.113.5, mx.exemple.fr), Microsoft décrit le MÊME
+    # triplet sans nombre exploitable. Le total interne CONNU vaut 3 ; le cacher
+    # derrière un « inconnu » est tout aussi trompeur que le faux zéro qu'on a corrigé
+    # pour `summary` — un mensonge par ignorance feinte au lieu d'un mensonge par
+    # défaut. On affiche donc ce qu'on sait (`sessions` = somme des occurrences
+    # lisibles, `None` seulement si AUCUNE ne l'était) et on DIT que c'est un minorant
+    # via `partial` : `true` signifie « au moins 3, peut-être plus, une source au
+    # moins n'a rien pu chiffrer ». Au frontend de traduire ça en « au moins 3
+    # sessions » plutôt que de choisir entre un chiffre faux et un silence feint.
+    failures_unsorted = [
+        {"result_type": rt,
+         "sessions": v["total"] if v["has_known"] else None,
+         "partial": v["has_unknown"],
          "sending_mta_ip": ip or None, "receiving_mx_hostname": mx or None}
-        for (rt, ip, mx), v in sorted(detail.items(),
-                                       key=lambda kv: kv[1]["total"], reverse=True)
+        for (rt, ip, mx), v in detail.items()
     ]
+
+    # Tri par magnitude décroissante — SAUF que la magnitude inconnue (`sessions: None`)
+    # ne va jamais en bas de liste : elle n'est pas « la moins grave », elle est juste
+    # « pas mesurée ». La reléguer en fin de liste la ferait passer, à l'écran, pour
+    # anodine. On la fait donc remonter en tête, avant tout total connu.
+    failures = sorted(failures_unsorted,
+                       key=lambda f: (f["sessions"] is not None, -(f["sessions"] or 0)))
 
     total = sessions_ok + sessions_failed
 
