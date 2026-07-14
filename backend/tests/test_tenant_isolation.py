@@ -211,3 +211,28 @@ def test_ip_TLS_vue_par_b_est_invisible_de_a(seed_two_tenants):
                 ReportRow.data["sending_mta_ip"].astext == "198.51.100.77").delete(
                 synchronize_session=False)
             db.commit()
+
+
+def test_les_alertes_d_un_tenant_sont_invisibles_de_l_autre(seed_two_tenants):
+    """Les alertes sont des données de client : `alert` porte un tenant_id, donc la RLS
+    s'applique — aucune exception, contrairement au cache ip_intel.
+    """
+    from datetime import datetime, timezone
+
+    from app.db.models import Alert
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:
+        db.add(Alert(tenant_id=tid_b, kind="never_reported", dedup_key="",
+                     severity="critical", payload={"domain": "b"},
+                     opened_at=datetime.now(timezone.utc)))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:
+            assert db.query(Alert).all() == []
+    finally:
+        with get_session() as db:
+            db.query(Alert).filter_by(tenant_id=tid_b).delete()
+            db.commit()

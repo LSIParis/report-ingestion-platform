@@ -83,6 +83,26 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: reports-raw
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_SILENCE_DAYS: ${ALERT_SILENCE_DAYS:-4}
+      ALERT_ONBOARDING_GRACE_DAYS: ${ALERT_ONBOARDING_GRACE_DAYS:-7}
+      ALERT_TLS_WINDOW_DAYS: ${ALERT_TLS_WINDOW_DAYS:-7}
+
+  beat:
+    build: ../backend
+    # `/app` appartient a root dans l'image (COPY avant USER appuser) : le conteneur
+    # tourne en appuser, qui ne peut pas y ecrire le fichier de planification persistant.
+    # `/tmp` est le seul repertoire inscriptible par appuser -- Beat n'a besoin d'aucune
+    # persistance au-dela d'un redemarrage (le planning est redeclare au code, pas lu
+    # depuis ce fichier).
+    command: celery -A app.celery_app beat -l info -s /tmp/celerybeat-schedule
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    environment:
+      DATABASE_URL_API: postgresql://app_api:app_api@postgres:5432/reports
+      DATABASE_URL_WORKER: postgresql://app_worker:app_worker@postgres:5432/reports
+      REDIS_URL: redis://redis:6379/0
 
   imap-worker:
     build: ../backend

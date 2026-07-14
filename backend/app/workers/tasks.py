@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import email as email_lib
+from datetime import datetime, timezone
 from email.message import Message
 
 import structlog
 
 from app.celery_app import celery
 from app.config import settings
-from app.db.models import Attachment, Email, ParsingError, Report, ReportRow, Tenant
-from app.db.session import get_session
+from app.db.models import Alert, Attachment, Email, ParsingError, Report, ReportRow, Tenant
+from app.db.session import get_session, tenant_scoped_session
 from app.normalization.normalizer import NormalizationService
 from app.normalization.profiles import load_profile, select_profile
 from app.parsing.base import ParseResult
@@ -17,6 +18,8 @@ from app.parsing.guards import guard_report_domain
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
 from app.services import antivirus
+from app.services.alerting import webhook
+from app.services.alerting.reconciler import reconcile
 from app.services.antivirus import AntivirusUnavailable
 from app.services.audit import audit
 from app.storage import ObjectStore
@@ -58,6 +61,15 @@ def process_email(self, email_id: str) -> None:
         statuses += ["failed"] * unreadable    # idem pour une PJ illisible (déjà tracée)
         final = _aggregate(statuses)
         _set_status(email_id, final)
+
+        # Les alertes TLS apparaissent alors en minutes, pas le lendemain. C'est gratuit :
+        # le réconciliateur est idempotent. Et ça ne casse JAMAIS le flux — un e-mail bien
+        # traité reste bien traité, même si l'alerting tombe.
+        try:
+            reconcile_tenant(match.tenant_id)
+        except Exception:  # noqa: BLE001
+            log.exception("alerting.reconciliation_en_echec", email_id=email_id)
+
         audit(actor="system", action="email.processed", target_id=email_id,
               tenant_id=match.tenant_id, metadata={"result": final})
 
@@ -77,6 +89,77 @@ def reprocess_report(email_id: str) -> None:
     """Reprise manuelle depuis le brut S3 — sans re-recevoir le mail. Idempotent."""
     _cleanup_previous(email_id)
     process_email.delay(email_id)
+
+
+# ---------------- alertes ----------------
+@celery.task
+def sweep_alerts() -> None:
+    """Balayage quotidien de tous les domaines actifs.
+
+    Un ordonnanceur est INDISPENSABLE ici, et c'est contre-intuitif : un échec TLS arrive
+    avec un e-mail, donc le worker tourne déjà. Mais un domaine SILENCIEUX ne produit aucun
+    événement — c'est sa définition même. On ne peut pas réagir à ce qui n'arrive pas.
+    """
+    with get_session() as db:      # plan système : juste pour ÉNUMÉRER les domaines
+        tenant_ids = [str(t.id) for t in
+                      db.query(Tenant).filter_by(status="active").all()]
+
+    for tenant_id in tenant_ids:
+        try:
+            reconcile_tenant(tenant_id)
+        except Exception:  # noqa: BLE001 — un domaine en échec ne prive pas les autres
+            log.exception("alerting.balayage_en_echec", tenant_id=tenant_id)
+
+
+def reconcile_tenant(tenant_id: str) -> None:
+    """Réconcilie les alertes d'UN domaine, puis notifie.
+
+    ⚠️ SESSION SCOPÉE, SANS BYPASS — et c'est tout l'enjeu de cette fonction.
+
+    Les détecteurs n'ont AUCUN filtre `tenant_id` applicatif : ils comptent sur la RLS
+    (CLAUDE.md). Leur passer la session du worker (`get_session()`, qui a BYPASSRLS) leur
+    ferait voir TOUS les tenants — et ouvrirait les alertes d'un client sur le domaine d'un
+    autre. Avec un seul tenant en développement, ce bug est INVISIBLE.
+    """
+    evenements: list[tuple[str, str]] = []
+
+    with tenant_scoped_session(tenant_id=tenant_id) as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant or tenant.status != "active":
+            return
+        res = reconcile(db, tenant)
+        # Les ids doivent être lus AVANT la fermeture de la session.
+        evenements = ([("opened", str(a.id)) for a in res.opened]
+                      + [("closed", str(a.id)) for a in res.closed])
+
+    # Notifier APRÈS le commit : on ne notifie que ce qui est réellement en base.
+    for event, alert_id in evenements:
+        try:
+            notify_alert.delay(event, alert_id)
+        except Exception:  # noqa: BLE001 — le canal ne casse JAMAIS le flux métier
+            log.exception("alerting.notification_non_planifiee",
+                          alert_event=event, alert_id=alert_id)
+
+
+@celery.task(bind=True, max_retries=5, default_retry_delay=60)
+def notify_alert(self, event: str, alert_id: str) -> None:
+    """Envoie une alerte sur le webhook. Retenté par Celery si le canal est en panne.
+
+    L'alerte reste ouverte en base quoi qu'il arrive : un canal indisponible fait perdre
+    une NOTIFICATION, jamais une ALERTE.
+    """
+    with get_session() as db:            # tâche système : lecture cross-tenant assumée
+        alerte = db.get(Alert, alert_id)
+        if not alerte:
+            return
+        tenant = db.get(Tenant, alerte.tenant_id)
+        try:
+            envoye = webhook.envoyer(event, alerte, tenant)
+        except webhook.WebhookIndisponible as exc:
+            raise self.retry(exc=exc)    # noqa: B904 — retry Celery
+        if envoye:
+            alerte.notified_at = datetime.now(timezone.utc)
+            db.commit()
 
 
 # ---------------- helpers ----------------

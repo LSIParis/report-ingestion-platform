@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.config import settings
 
@@ -20,3 +21,12 @@ celery.conf.update(
     result_expires=86400,
     broker_transport_options={"visibility_timeout": 3600},
 )
+
+# Un domaine SILENCIEUX ne produit aucun événement — c'est sa définition. Il faut donc
+# aller le chercher : un balayage quotidien, tôt le matin.
+celery.conf.beat_schedule = {
+    "balayage-alertes": {
+        "task": "app.workers.tasks.sweep_alerts",
+        "schedule": crontab(hour=6, minute=0),
+    },
+}
