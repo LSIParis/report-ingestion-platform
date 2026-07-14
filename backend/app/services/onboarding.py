@@ -105,7 +105,36 @@ def _served_policy(domain: str) -> tuple[Status, str]:
 
 
 # ---------------------------------------------------------------- checklist
-def build(domain: str, *, mailbox: str, reporting_domain: str,
+def _auth_step(key: str, *, domain: str, reporting_domain: str, prefix: str,
+               expected: str, title: str, why: str, case_note: str = "") -> Step:
+    """Autorisation de collecte externe (RFC 7489 §7.1 / RFC 8460 §3).
+
+    Elle n'a de sens que si la boîte de collecte est sur un AUTRE domaine que celui
+    surveillé. Quand le domaine héberge lui-même la boîte — c'est le cas du domaine de
+    messagerie de la plateforme — la destination n'est pas externe : il n'y a personne
+    à qui demander l'autorisation, et réclamer l'enregistrement serait faux.
+    """
+    if domain == reporting_domain:
+        return Step(key=key, title=title, zone=domain, status="ok",
+                    why=why, detail="sans objet : la boîte de collecte est sur ce "
+                                    "domaine, la destination n'est pas externe")
+
+    name = f"{domain}._report.{prefix}"
+    found = next((t for t in _txt(f"{name}.{reporting_domain}")
+                  if expected.split("=")[1][:6].upper() in t.upper()), None)
+    if found == expected:
+        status, detail = "ok", ""
+    elif found:
+        status, detail = "warn", f"valeur incorrecte (attendu exactement « {expected} »)"
+        detail += case_note
+    else:
+        status, detail = "todo", ""
+    return Step(key=key, title=title, why=why, zone=reporting_domain,
+                status=status, detail=detail, found=found,
+                record={"type": "TXT", "name": name, "value": expected})
+
+
+def build(domain: str, *, mailbox: str, tlsrpt_mailbox: str, reporting_domain: str,
           mta_sts_ip: str) -> Checklist:
     domain = domain.lower()
     mx = resolve_mx(domain)
@@ -129,48 +158,42 @@ def build(domain: str, *, mailbox: str, reporting_domain: str,
         record={"type": "TXT", "name": "_dmarc",
                 "value": f"v=DMARC1; p=none; {want_rua}; adkim=s;"}))
 
-    # 2. Autorisation DMARC (la boîte est sur un autre domaine).
-    name = f"{domain}._report._dmarc"
-    found = next((t for t in _txt(f"{name}.{reporting_domain}") if "DMARC1" in t), None)
-    cl.steps.append(Step(
-        key="dmarc_auth", zone=reporting_domain, found=found,
-        status="ok" if found == "v=DMARC1" else ("warn" if found else "todo"),
-        detail="" if found == "v=DMARC1" else (
-            "valeur incorrecte (attendu exactement « v=DMARC1 »)" if found else ""),
+    # 2. Autorisation DMARC.
+    cl.steps.append(_auth_step(
+        "dmarc_auth", domain=domain, reporting_domain=reporting_domain,
+        prefix="_dmarc", expected="v=DMARC1",
         title="Autoriser la collecte des rapports DMARC",
-        why="La boîte de collecte n'appartient pas au domaine surveillé : notre domaine "
-            "doit déclarer qu'il accepte ses rapports (RFC 7489 §7.1).",
-        record={"type": "TXT", "name": name, "value": "v=DMARC1"}))
+        why="Quand la boîte de collecte n'appartient pas au domaine surveillé, notre "
+            "domaine doit déclarer qu'il accepte ses rapports (RFC 7489 §7.1)."))
 
     # 3. TLS-RPT — l'instrument sans lequel MTA-STS est aveugle.
-    tlsrpt = next((t for t in _txt(f"_smtp._tls.{domain}") if t.startswith("v=TLSRPTv1")),
+    #    ATTENTION : les rapports TLS vont dans une boîte DISTINCTE de celle des rapports
+    #    DMARC. Ce sont deux flux différents ; les confondre publie un enregistrement qui
+    #    a l'air correct et envoie les rapports au mauvais endroit.
+    tlsrpt = next((t for t in _txt(f"_smtp._tls.{domain}") if t.upper().startswith("V=TLSRPT")),
                   None)
-    ok_tls = bool(tlsrpt) and f"rua=mailto:{mailbox}" in (tlsrpt or "").replace(" ", "")
+    ok_tls = bool(tlsrpt) and f"rua=mailto:{tlsrpt_mailbox}" in (tlsrpt or "").replace(" ", "")
     cl.steps.append(Step(
         key="tlsrpt", zone=domain, found=tlsrpt,
         status="ok" if ok_tls else ("warn" if tlsrpt else "todo"),
-        detail="" if ok_tls else ("publié, mais pointe ailleurs" if tlsrpt else ""),
+        detail="" if ok_tls else (
+            "publié, mais les rapports TLS ne vont pas vers cette plateforme"
+            if tlsrpt else ""),
         title="Publier l'enregistrement TLS-RPT",
         why="Il signale les échecs de chiffrement SANS bloquer le courrier. C'est lui "
             "qui rend le passage de MTA-STS en enforce sûr — sans lui, on durcit à "
             "l'aveugle.",
         record={"type": "TXT", "name": "_smtp._tls",
-                "value": f"v=TLSRPTv1; rua=mailto:{mailbox}"}))
+                "value": f"v=TLSRPTv1; rua=mailto:{tlsrpt_mailbox}"}))
 
-    # 4. Autorisation TLS-RPT. ATTENTION : la casse est NORMATIVE ici (RFC 8460 §3,
-    #    version définie en octets hexadécimaux) — 'v=TLSRPTV1' est invalide.
-    name = f"{domain}._report._smtp._tls"
-    found = next((t for t in _txt(f"{name}.{reporting_domain}") if "TLSRPT" in t.upper()),
-                 None)
-    cl.steps.append(Step(
-        key="tlsrpt_auth", zone=reporting_domain, found=found,
-        status="ok" if found == "v=TLSRPTv1" else ("warn" if found else "todo"),
-        detail="" if found == "v=TLSRPTv1" else (
-            "valeur incorrecte — la casse est normative, il faut exactement "
-            "« v=TLSRPTv1 »" if found else ""),
+    # 4. Autorisation TLS-RPT.
+    cl.steps.append(_auth_step(
+        "tlsrpt_auth", domain=domain, reporting_domain=reporting_domain,
+        prefix="_smtp._tls", expected="v=TLSRPTv1",
         title="Autoriser la collecte des rapports TLS",
         why="Même principe que pour DMARC (RFC 8460 §3).",
-        record={"type": "TXT", "name": name, "value": "v=TLSRPTv1"}))
+        case_note=" — la casse est NORMATIVE ici : la RFC 8460 définit la version en "
+                  "octets hexadécimaux, « v=TLSRPTV1 » est invalide."))
 
     # 5. Hôte servant la politique MTA-STS.
     ips = _has_a(f"mta-sts.{domain}")

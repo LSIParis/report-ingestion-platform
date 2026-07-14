@@ -137,6 +137,10 @@ services:
       # IMAP_USER (et non un réglage séparé) pour que la boîte annoncée aux clients ne
       # puisse pas diverger de celle qu'on relève réellement.
       COLLECTION_MAILBOX: ${IMAP_USER}
+      # Les rapports TLS arrivent dans une boîte DISTINCTE de celle des rapports DMARC :
+      # deux flux, deux enregistrements DNS. Les confondre publie un enregistrement
+      # d'apparence correcte qui envoie les rapports au mauvais endroit.
+      TLSRPT_MAILBOX: ${TLSRPT_MAILBOX:-}
       MTA_STS_IP: ${MTA_STS_IP:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
 

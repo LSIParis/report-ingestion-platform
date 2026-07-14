@@ -170,6 +170,7 @@ def tenant_onboarding(tenant_id: str):
     return onboarding.build(
         domain,
         mailbox=settings.collection_mailbox,
+        tlsrpt_mailbox=settings.tlsrpt_mailbox or settings.collection_mailbox,
         reporting_domain=settings.reporting_domain,
         mta_sts_ip=settings.mta_sts_ip,
     ).as_dict()

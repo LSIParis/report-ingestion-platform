@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Adresse où les domaines surveillés doivent envoyer leurs rapports. Par défaut la
     # boîte relevée par l'ingestion : les deux ne peuvent pas diverger.
     collection_mailbox: str = ""
+    # Les rapports TLS-RPT arrivent dans une boîte DISTINCTE de celle des rapports DMARC :
+    # ce sont deux flux différents, avec deux enregistrements DNS différents.
+    tlsrpt_mailbox: str = ""
     # Domaine qui doit publier les autorisations de collecte externe (X._report._dmarc).
     reporting_domain: str = ""
     # IP de l'hôte qui sert les politiques MTA-STS (enregistrement A `mta-sts.<domaine>`).
