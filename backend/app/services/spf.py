@@ -24,8 +24,13 @@ from dataclasses import dataclass
 import dns.exception
 import dns.resolver
 
+from app.config import settings
+
 _RESOLVER = dns.resolver.Resolver()
 _RESOLVER.lifetime = 5.0
+# Mêmes serveurs que l'enrichissement (voir app/services/ip_intel.py) : on ne dépend pas
+# du résolveur du conteneur.
+_RESOLVER.nameservers = [s.strip() for s in settings.dns_resolvers.split(",") if s.strip()]
 
 _DNS_ERRORS = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.Timeout,
                dns.resolver.NoNameservers, dns.exception.DNSException)

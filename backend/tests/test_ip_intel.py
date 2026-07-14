@@ -116,6 +116,19 @@ def test_ip_invalide_ne_leve_pas(dns_stub):
     assert facts == ip_intel.IpFacts(ip="pas-une-ip")
 
 
+def test_le_resolveur_ne_se_fie_pas_au_dns_du_conteneur():
+    """Le résolveur embarqué de Docker (127.0.0.11) NE RELAIE PAS les requêtes PTR pour
+    les IP publiques : il répond « NoAnswer ».
+
+    Si on retombait dessus, le reverse DNS serait systématiquement vide — donc plus aucun
+    FCrDNS, donc plus aucun expéditeur identifié — et **rien ne le signalerait** : pas
+    d'exception, pas d'erreur, juste un catalogue qui ne reconnaît plus jamais personne.
+    Le genre de panne qu'on met six mois à voir. D'où ce test.
+    """
+    assert ip_intel._RESOLVER.nameservers, "aucun serveur DNS configuré"
+    assert "127.0.0.11" not in ip_intel._RESOLVER.nameservers
+
+
 def test_cymru_multi_asn_prend_le_premier(dns_stub):
     # Un préfixe peut être annoncé par plusieurs AS. On prend le premier, sans deviner.
     dns_stub[("4.3.2.1.origin.asn.cymru.com", "TXT")] = [

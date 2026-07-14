@@ -25,8 +25,15 @@ import dns.exception
 import dns.resolver
 import dns.reversename
 
+from app.config import settings
+
 _RESOLVER = dns.resolver.Resolver()
 _RESOLVER.lifetime = 5.0
+# On ne se fie PAS au résolveur du conteneur. Celui de Docker (127.0.0.11) ne relaie pas
+# les requêtes PTR pour les IP publiques : il répond « NoAnswer ». Le reverse DNS serait
+# donc systématiquement vide — et avec lui le FCrDNS, donc toute identification
+# d'expéditeur — sans qu'aucune erreur ne le signale. Vérifié, pas supposé.
+_RESOLVER.nameservers = [s.strip() for s in settings.dns_resolvers.split(",") if s.strip()]
 
 _DNS_ERRORS = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.Timeout,
                dns.resolver.NoNameservers, dns.exception.DNSException)
