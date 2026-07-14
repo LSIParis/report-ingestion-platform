@@ -43,7 +43,17 @@ _DETECTORS: dict[str, Detector] = {}
 
 
 def register_detector(kind: str):
+    """Enregistre un détecteur sous `kind`. Refuse un `kind` déjà pris plutôt que de
+    l'écraser en silence : le design invite explicitement à ajouter un détecteur par
+    simple fichier (CLAUDE.md), donc quelqu'un réutilisera un jour un `kind` existant.
+    Un écrasement silencieux ferait disparaître une alerte ENTIÈRE sans la moindre
+    erreur — exactement la classe de panne que ce chantier existe pour combattre."""
     def deco(fn: Detector) -> Detector:
+        if kind in _DETECTORS:
+            raise ValueError(
+                f"détecteur déjà enregistré pour kind={kind!r} "
+                f"({_DETECTORS[kind].__module__}.{_DETECTORS[kind].__qualname__}) "
+                f"— choisissez un autre kind ou renommez le détecteur existant")
         _DETECTORS[kind] = fn
         return fn
     return deco

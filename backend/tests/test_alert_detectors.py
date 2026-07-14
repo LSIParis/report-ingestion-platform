@@ -9,9 +9,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.config import settings
 from app.db.models import Email, Report, ReportRow, Tenant
 from app.db.session import get_session, tenant_scoped_session
 from app.services.alerting.base import all_conditions
+from app.services.tls_posture import posture
 
 
 @pytest.fixture
@@ -55,17 +57,20 @@ def _rapport(tid: str, *, il_y_a_jours: int, profil: str = "_default_dmarc_xml")
     return rid
 
 
-def _ligne_tls_en_echec(tid: str, rid: str):
-    hier = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+def _ligne_tls_en_echec(tid: str, rid: str, *, il_y_a_jours: int = 1):
+    """Un résumé + une ligne d'échec TLS, datés d'il y a N jours en `report_date` — la
+    date déclarée par le fournisseur, celle que regarde la fenêtre d'alerte (pas
+    `Report.created_at`, qui date notre réception)."""
+    quand = (datetime.now(timezone.utc) - timedelta(days=il_y_a_jours)).date().isoformat()
     with get_session() as db:
         db.add(ReportRow(tenant_id=tid, report_id=rid, data={
             "kind": "summary", "successful_sessions": 100, "failed_sessions": 3,
-            "policy_domain": "det.test", "reporter": "Google Inc.", "report_date": hier}))
+            "policy_domain": "det.test", "reporter": "Google Inc.", "report_date": quand}))
         db.add(ReportRow(tenant_id=tid, report_id=rid, data={
             "kind": "failure", "result_type": "certificate-host-mismatch",
             "sending_mta_ip": "203.0.113.5", "receiving_mx_hostname": "mx.det.test",
             "failure_sessions": 3, "policy_domain": "det.test",
-            "reporter": "Google Inc.", "report_date": hier}))
+            "reporter": "Google Inc.", "report_date": quand}))
         db.commit()
 
 
@@ -178,3 +183,110 @@ def test_un_detecteur_casse_ne_prive_pas_des_autres(domaine, monkeypatch):
     kinds = [c.kind for c in _conditions(domaine)]
 
     assert "never_reported" in kinds      # les autres ont bien tourné
+
+
+# ---------------------------------------------------------- tls_failure : fraîcheur
+def test_tls_failure_se_tait_si_l_echec_date_de_plus_que_la_fenetre_d_alerte(domaine):
+    """Le PANNEAU de posture (30 jours) regarde une TENDANCE — ce n'est pas son rôle de
+    parler du présent, on n'y touche pas. Une ALERTE, elle, affirme « en ce moment » : elle
+    ne peut le dire honnêtement que sur un échec vu dans sa fenêtre COURTE. Un échec vieux
+    de trois semaines (le domaine est peut-être devenu silencieux depuis — exactement ce
+    que `domain_silent` détecte) ne doit PAS rouvrir une urgence sur des cendres."""
+    rid = _rapport(domaine, il_y_a_jours=21, profil="_default_tlsrpt_json")
+    _ligne_tls_en_echec(domaine, rid, il_y_a_jours=21)
+    _mode(domaine, "enforce")
+
+    assert "tls_failure" not in [c.kind for c in _conditions(domaine)]
+
+    # Preuve que ce n'est pas juste "posture() ne voit rien" : à 30 jours (la fenêtre du
+    # panneau), le même échec est toujours visible. L'alerte et le panneau répondent à
+    # deux questions différentes ; elles n'ont pas à donner la même réponse.
+    with tenant_scoped_session(tenant_id=domaine) as db:
+        p = posture(db, days=30)
+    assert p["failures"], "le panneau à 30 jours doit toujours voir cet échec"
+
+
+def test_tls_failure_leve_si_l_echec_est_dans_la_fenetre_d_alerte(domaine):
+    """Symétrique du test précédent : un échec réellement récent doit, lui, lever
+    l'alerte — la fenêtre courte ne doit pas la faire taire à tort."""
+    rid = _rapport(domaine, il_y_a_jours=1, profil="_default_tlsrpt_json")
+    _ligne_tls_en_echec(domaine, rid, il_y_a_jours=1)
+    _mode(domaine, "enforce")
+
+    assert "tls_failure" in [c.kind for c in _conditions(domaine)]
+
+
+def test_tls_failure_expose_la_fenetre_utilisee_dans_le_payload(domaine):
+    """L'exploitant doit pouvoir voir sur quoi l'alerte se fonde — pas nous croire sur
+    parole."""
+    rid = _rapport(domaine, il_y_a_jours=1, profil="_default_tlsrpt_json")
+    _ligne_tls_en_echec(domaine, rid, il_y_a_jours=1)
+    _mode(domaine, "testing")
+
+    c = next(c for c in _conditions(domaine) if c.kind == "tls_failure")
+    assert c.payload["window_days"] == settings.alert_tls_window_days
+
+
+# ---------------------------------------------------------------------- registre
+def test_enregistrer_un_kind_deja_pris_leve():
+    """Le design invite explicitement à ajouter un détecteur par simple fichier :
+    quelqu'un réutilisera un `kind` déjà pris, et un écrasement silencieux ferait
+    disparaître une alerte entière sans la moindre erreur. On refuse plutôt que
+    d'écraser."""
+    from app.services.alerting import base
+
+    with pytest.raises(ValueError):
+        @base.register_detector("tls_failure")
+        def _autre(db, tenant):
+            return []
+
+    # L'échec de l'enregistrement ne doit pas avoir corrompu le détecteur existant.
+    assert base._DETECTORS["tls_failure"].__module__.endswith("tls_failure")
+
+
+# ------------------------------------------------------------- domaine suspendu
+def test_domaine_suspendu_sans_aucun_rapport_ne_leve_rien():
+    """Un domaine coupé, jamais rapporté, aurait fait lever `never_reported` s'il était
+    actif (voir le premier test du fichier). Suspendu, il ne doit rien lever."""
+    with get_session() as db:
+        t = Tenant(domain=f"susp-{uuid.uuid4().hex[:8]}.test", name="Suspendu",
+                   created_at=datetime.now(timezone.utc) - timedelta(days=30),
+                   status="suspended")
+        db.add(t)
+        db.commit()
+        tid = str(t.id)
+    try:
+        assert _conditions(tid) == []
+    finally:
+        with get_session() as db:
+            db.query(Tenant).filter_by(id=tid).delete()
+            db.commit()
+
+
+def test_domaine_suspendu_avec_silence_et_echec_tls_ne_leve_rien():
+    """Même en présence de données qui feraient lever `domain_silent` ET `tls_failure`
+    sur un domaine actif (rapport ancien, échec TLS récent, mode enforce), un domaine
+    suspendu ne doit rien lever : les trois détecteurs le vérifient en premier."""
+    with get_session() as db:
+        t = Tenant(domain=f"susp-{uuid.uuid4().hex[:8]}.test", name="Suspendu",
+                   created_at=datetime.now(timezone.utc) - timedelta(days=30),
+                   status="suspended", mta_sts_mode="enforce")
+        db.add(t)
+        db.commit()
+        tid = str(t.id)
+
+    try:
+        rid = _rapport(tid, il_y_a_jours=10, profil="_default_tlsrpt_json")
+        _ligne_tls_en_echec(tid, rid, il_y_a_jours=1)
+
+        assert _conditions(tid) == []
+    finally:
+        with get_session() as db:
+            reps = [r.id for r in db.query(Report).filter_by(tenant_id=tid).all()]
+            if reps:
+                db.query(ReportRow).filter(ReportRow.report_id.in_(reps)).delete(
+                    synchronize_session=False)
+                db.query(Report).filter(Report.id.in_(reps)).delete(synchronize_session=False)
+            db.query(Email).filter_by(tenant_id=tid).delete()
+            db.query(Tenant).filter_by(id=tid).delete()
+            db.commit()

@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     alert_silence_days: int = 4
     # Délai laissé à un nouveau domaine pour publier son DMARC avant qu'on s'en inquiète.
     alert_onboarding_grace_days: int = 7
+    # Fenêtre propre à l'ALERTE tls_failure — distincte des 30 jours du PANNEAU de
+    # posture (`posture(db, days=30)`, qui montre une TENDANCE). Une alerte, elle,
+    # affirme le PRÉSENT (« du courrier est perdu, maintenant ») : elle ne peut le dire
+    # honnêtement que sur un échec vu récemment. Au-delà de cette fenêtre, l'alerte se
+    # ferme d'elle-même — un domaine devenu silencieux depuis ne doit pas laisser une
+    # alerte TLS crier sur des cendres.
+    alert_tls_window_days: int = 7
 
     def model_post_init(self, __context) -> None:
         """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""
