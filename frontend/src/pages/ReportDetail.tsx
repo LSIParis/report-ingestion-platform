@@ -60,20 +60,34 @@ function RowsTable({ reportId }: { reportId: string }) {
   const [ip, setIp] = useState<string | null>(null);
   const { data, isLoading } = useReportRows(reportId, page);
   if (isLoading) return <p>Chargement…</p>;
-  const rows = data!.items;
-  if (!rows.length) return <p className="text-gray-500">Aucune donnée.</p>;
+  const items = data!.items;
+  if (!items.length) return <p className="text-gray-500">Aucune donnée.</p>;
 
-  // Une ligne DMARC se reconnaît à ses DONNÉES, pas à un nom de profil : `Report` ne
+  // L'API renvoie des enveloppes `{ id, report_date, data }` (voir `ReportRowEnvelope`
+  // dans api/reports.ts) : les clés métier (source_ip, kind, policy_domain…) vivent
+  // dans `data`, jamais à la racine. Sans ce dépli, isDmarc/isTls valent toujours false
+  // et GenericTable affiche littéralement `[object Object]` — c'était le bug qui
+  // rendait DmarcTable et TlsTable inatteignables.
+  const rows = items.map((r) => r.data);
+
+  // Chaque famille se reconnaît à ses DONNÉES, pas à un nom de profil : `Report` ne
   // stocke pas le format, seulement source_type (attachment/body) et profile_id.
   const isDmarc = "source_ip" in rows[0];
+  const isTls = "kind" in rows[0] && "policy_domain" in rows[0];
 
   return (
     <>
-      {isDmarc ? <DmarcTable rows={rows} onSelectIp={setIp} /> : <GenericTable rows={rows} />}
+      {isDmarc ? (
+        <DmarcTable rows={rows} onSelectIp={setIp} />
+      ) : isTls ? (
+        <TlsTable rows={rows} onSelectIp={setIp} />
+      ) : (
+        <GenericTable rows={rows} />
+      )}
       <div className="flex gap-2 mt-4 items-center">
         <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="disabled:opacity-40">←</button>
         <span className="text-sm">Page {page} · {data?.total} lignes</span>
-        <button disabled={rows.length < 50} onClick={() => setPage(page + 1)} className="disabled:opacity-40">→</button>
+        <button disabled={items.length < 50} onClick={() => setPage(page + 1)} className="disabled:opacity-40">→</button>
       </div>
       {ip && <IpPanel ip={ip} onClose={() => setIp(null)} />}
     </>
@@ -131,6 +145,97 @@ function DmarcTable({
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/** Un rapport TLS mêle deux natures de lignes : le bilan chiffré d'une politique, et le
+ *  détail de chaque échec. Les afficher pêle-mêle dans une table à colonnes fixes
+ *  produirait une forêt de tirets. On les sépare. */
+function TlsTable({
+  rows,
+  onSelectIp,
+}: {
+  rows: Record<string, unknown>[];
+  onSelectIp: (ip: string) => void;
+}) {
+  const summaries = rows.filter((r) => r.kind === "summary");
+  const failures = rows.filter((r) => r.kind === "failure");
+
+  return (
+    <div className="space-y-6">
+      {summaries.length > 0 && (
+        <div>
+          <h3 className="mb-2 text-xs uppercase tracking-wide text-gray-400">Sessions</h3>
+          <table className="w-full text-sm">
+            <thead className="border-b text-left text-gray-500">
+              <tr>
+                <th className="py-2 pr-4">Politique</th>
+                <th className="py-2 pr-4">Serveurs couverts</th>
+                <th className="py-2 pr-4">Chiffrées</th>
+                <th className="py-2 pr-4">En échec</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaries.map((r, i) => (
+                <tr key={i} className="border-b">
+                  <td className="py-1 pr-4">{String(r.policy_type ?? "—")}</td>
+                  <td className="py-1 pr-4 font-mono text-xs">{String(r.mx_host ?? "—")}</td>
+                  <td className="py-1 pr-4 text-green-700">
+                    {String(r.successful_sessions ?? "—")}
+                  </td>
+                  <td className="py-1 pr-4 text-red-700">
+                    {String(r.failed_sessions ?? "—")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {failures.length > 0 && (
+        <div>
+          <h3 className="mb-2 text-xs uppercase tracking-wide text-gray-400">
+            Échecs de chiffrement
+          </h3>
+          <table className="w-full text-sm">
+            <thead className="border-b text-left text-gray-500">
+              <tr>
+                <th className="py-2 pr-4">Type d'échec</th>
+                <th className="py-2 pr-4">Sessions</th>
+                <th className="py-2 pr-4">MTA émetteur</th>
+                <th className="py-2 pr-4">Serveur visé</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failures.map((r, i) => (
+                <tr key={i} className="border-b">
+                  <td className="py-1 pr-4">{String(r.result_type ?? "—")}</td>
+                  <td className="py-1 pr-4">{String(r.failure_sessions ?? "—")}</td>
+                  <td className="py-1 pr-4">
+                    {r.sending_mta_ip ? (
+                      // Une IP qui échoue en TLS mérite la même enquête qu'une IP rejetée
+                      // en DMARC : c'est le même panneau.
+                      <button
+                        onClick={() => onSelectIp(String(r.sending_mta_ip))}
+                        className="font-mono text-blue-600 hover:underline"
+                      >
+                        {String(r.sending_mta_ip)}
+                      </button>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="py-1 pr-4 font-mono text-xs">
+                    {String(r.receiving_mx_hostname ?? "—")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

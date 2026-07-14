@@ -29,6 +29,20 @@ export interface ParsingError {
   created_at: string;
 }
 
+/** L'enveloppe RÉELLE renvoyée par `GET /reports/{id}/rows` (voir `ReportRowOut` côté
+ *  backend) : les clés métier (source_ip, kind, policy_domain…) vivent dans `data`,
+ *  jamais à la racine. `Page<Record<string, unknown>>` ne décrivait PAS cette forme —
+ *  c'est ce qui a laissé passer le bug où `RowsTable` lisait `r.source_ip` à la racine
+ *  au lieu de `r.data.source_ip` : les tables ne s'affichaient jamais, et TypeScript
+ *  n'a rien dit puisque `Record<string, unknown>` accepte n'importe quelle clé. Avec
+ *  cette enveloppe explicite, accéder à une clé hors de `id`/`report_date`/`data`
+ *  redevient une erreur de type. */
+export interface ReportRowEnvelope {
+  id: string;
+  report_date: string | null;
+  data: Record<string, unknown>;
+}
+
 export function useReports(filters: { status?: string; brand?: string; page: number }) {
   const qs = new URLSearchParams();
   if (filters.status) qs.set("status_f", filters.status);
@@ -47,7 +61,7 @@ export const useReport = (id: string) =>
 export const useReportRows = (id: string, page: number) =>
   useQuery({
     queryKey: ["report", id, "rows", page],
-    queryFn: () => api<Page<Record<string, unknown>>>(`/reports/${id}/rows?page=${page}`),
+    queryFn: () => api<Page<ReportRowEnvelope>>(`/reports/${id}/rows?page=${page}`),
     placeholderData: (prev) => prev,
   });
 

@@ -1,0 +1,24 @@
+{
+  "profile_id": "_default_tlsrpt_json",
+  "tenant_id": "*",
+  "format": "tlsrpt_json",
+  "detection": {},
+  "field_mapping": {
+    "kind":                  { "target": "kind",                  "type": "string", "required": true },
+    "report_date":           { "target": "report_date",           "type": "date", "format": "%Y-%m-%d", "required": true },
+    "period_end":            { "target": "period_end",            "type": "date", "format": "%Y-%m-%d" },
+    "reporter":              { "target": "reporter",              "type": "string", "required": true },
+    "report_id":             { "target": "report_id",             "type": "string", "required": true },
+    "policy_domain":         { "target": "policy_domain",         "type": "string", "required": true },
+    "policy_type":           { "target": "policy_type",           "type": "string" },
+    "mx_host":               { "target": "mx_host",               "type": "string" },
+    "successful_sessions":   { "target": "successful_sessions",   "type": "int" },
+    "failed_sessions":       { "target": "failed_sessions",       "type": "int" },
+    "result_type":           { "target": "result_type",           "type": "string" },
+    "sending_mta_ip":        { "target": "sending_mta_ip",        "type": "string" },
+    "receiving_mx_hostname": { "target": "receiving_mx_hostname", "type": "string" },
+    "receiving_ip":          { "target": "receiving_ip",          "type": "string" },
+    "failure_sessions":      { "target": "failure_sessions",      "type": "int" }
+  },
+  "validation": {}
+}

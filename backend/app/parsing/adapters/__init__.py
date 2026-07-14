@@ -4,5 +4,6 @@ from app.parsing.adapters import (  # noqa: F401
     csv_adapter,
     dmarc_adapter,
     pdf_adapter,
+    tlsrpt_adapter,
     xlsx_adapter,
 )

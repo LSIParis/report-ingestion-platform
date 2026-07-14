@@ -1302,8 +1302,6 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date, timedelta
 
-from sqlalchemy import Integer, cast
-
 from app.db.models import ReportRow
 
 _kind = ReportRow.data["kind"].astext
@@ -1369,10 +1367,11 @@ def _int(value) -> int:
         return 0
 ```
 
-Note : `cast` et `Integer` ne sont pas utilisés dans cette version (l'agrégation se fait
-en Python, sur un volume de lignes TLS très faible — quelques dizaines par mois et par
-domaine, contre des milliers pour DMARC). Supprimer l'import
-`from sqlalchemy import Integer, cast` s'il déclenche une erreur `ruff` F401.
+Note : l'agrégation se fait **en Python**, pas en SQL — contrairement à `api/metrics.py`
+qui agrège en base. C'est délibéré : le volume de lignes TLS est très faible (quelques
+dizaines par mois et par domaine, contre des milliers pour DMARC), et le calcul du
+non-double-comptage est bien plus lisible ici qu'en SQL. Si le volume grossissait, ce
+serait le premier endroit à basculer en agrégat SQL.
 
 - [ ] **Step 4: Ajouter la route admin**
 

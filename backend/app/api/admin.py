@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 
@@ -17,6 +17,7 @@ from app.services.audit import audit
 from app.services.rules import RuleError
 from app.services.rules import validate as validate_rule
 from app.services.tenants import ensure_tenant, set_tenant_active
+from app.services.tls_posture import posture
 from app.tenant_resolver.resolver import TenantResolverService
 from app.workers.tasks import reprocess_report
 
@@ -162,6 +163,25 @@ def get_mta_sts(tenant_id: str):
             "detected_mx": onboarding.mx_policy_for(onboarding.resolve_mx(t.domain)),
             "preview": mta_sts.render(t) if t.mta_sts_mx else "",
         }
+
+
+@router.get("/tenants/{tenant_id}/tls-posture")
+def tenant_tls_posture(tenant_id: str, days: int = Query(30, ge=1, le=365)):
+    """Les rapports TLS de CE domaine — la seule chose qui permette de décider d'un
+    passage en `enforce` sans durcir à l'aveugle.
+
+    Session scopée par la RLS sur ce tenant précis (pas de bypass, pas de `WHERE`
+    applicatif) : même un platform_admin ne peut pas lire les lignes d'un autre domaine
+    par cette route. C'est l'option la plus restrictive, et elle ne coûte rien.
+    """
+    with tenant_scoped_session(tenant_id=tenant_id) as db:
+        # Aligné sur `get_mta_sts` : un domaine inexistant renvoie 404, pas une posture
+        # à zéro (qui serait indiscernable d'un domaine réel resté silencieux). La table
+        # `tenant` ne porte pas de tenant_id et n'est pas soumise à la RLS (migration
+        # 0002) : cette lecture reste possible dans CETTE session scopée, sans bypass.
+        if not db.get(Tenant, tenant_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        return posture(db, days=days)
 
 
 @router.put("/tenants/{tenant_id}/mta-sts")

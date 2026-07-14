@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError } from "../api/client";
-import { useMtaSts, useSaveMtaSts } from "../api/domains";
+import { type TlsFailure, type TlsPosture, useMtaSts, useSaveMtaSts, useTlsPosture } from "../api/domains";
 
 /* MTA-STS force les serveurs distants à chiffrer le courrier qu'ils envoient vers ce
    domaine, et à vérifier le certificat du MX.
@@ -40,6 +40,7 @@ export function MtaStsPanel({
 }) {
   const q = useMtaSts(tenantId);
   const save = useSaveMtaSts(tenantId);
+  const tls = useTlsPosture(tenantId);
   const [mode, setMode] = useState<string>("");
   const [maxAge, setMaxAge] = useState(86400);
   const [mx, setMx] = useState("");
@@ -97,6 +98,30 @@ export function MtaStsPanel({
             de la négociation et lire le courrier en clair.
           </p>
         </header>
+
+        {/* isPending, PAS isLoading : en TanStack Query v5, isLoading vaut
+            isPending && isFetching. Si le réseau tombe (VPN, veille, proxy) avant la
+            première réponse, fetchStatus passe à "paused" : isFetching redevient false,
+            donc isLoading redevient false alors qu'on n'a TOUJOURS aucune donnée et
+            aucune erreur. Les trois branches échoueraient et le bandeau disparaîtrait en
+            silence — exactement le bug qu'on vient de corriger. isPending, lui, reste vrai
+            tant qu'il n'y a pas de données, en chargement comme en pause : les trois
+            branches (isPending / isError / data) redeviennent exhaustives sur `status`.
+            Ce piège ne se voit jamais en développement, où le réseau ne tombe pas — ne
+            "simplifie" pas ceci en isLoading. */}
+        {tls.isPending ? (
+          <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
+            Vérification des rapports TLS en cours…
+          </div>
+        ) : tls.isError ? (
+          <div className="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <strong>La posture TLS n'a pas pu être vérifiée.</strong> On ne sait donc rien
+            de l'état du chiffrement pour ce domaine — ce n'est en aucun cas le signe que
+            tout va bien. Réessayez avant d'envisager le mode appliqué.
+          </div>
+        ) : (
+          tls.data && <TlsVerdict p={tls.data} />
+        )}
 
         <fieldset className="space-y-2">
           <legend className="text-xs uppercase tracking-wide text-gray-500">Mode</legend>
@@ -232,4 +257,197 @@ export function MtaStsPanel({
       </form>
     </div>
   );
+}
+
+/* Le verdict TLS se lit JUSTE AVANT le sélecteur de mode, parce que c'est exactement là
+   que se prend la décision qu'il éclaire. Une page séparée qu'il faut penser à ouvrir ne
+   servirait personne.
+
+   Trois états, et le premier est le plus important : ne RIEN savoir n'est pas rassurant.
+   Un domaine silencieux n'est pas un domaine sans échec — c'est un domaine sur lequel on
+   n'a aucune donnée. Le dire autrement ferait durcir à l'aveugle, ce que TLS-RPT sert
+   précisément à éviter. */
+function TlsVerdict({ p }: { p: TlsPosture }) {
+  // sessions_total ne vient que des lignes `summary` (voir tls_posture.py) : un compteur
+  // de succès illisible avec 0 échec RESUME donne sessions_total === 0 alors que des
+  // rapports sont bel et bien arrivés (incomplete_rows > 0), et des lignes `failure`
+  // peuvent exister même quand leur `summary` a été rejeté par la normalisation
+  // (failures non vide). Un rapport (ou une pièce jointe qui prétendait en être un --
+  // on ne sait pas laquelle des deux, voir tls_posture.py) peut aussi n'avoir laissé
+  // AUCUNE ligne du tout (policy-domain illisible → rapport rejeté en bloc avant
+  // normalisation) : reports_unreadable le signale alors que
+  // sessions_total/failures/incomplete_rows restent tous à zéro, puisqu'aucun d'eux ne
+  // lit jamais que `report_row`. Dans ces trois cas, « aucun rapport reçu » est faux et
+  // avalerait silencieusement des échecs, de l'incomplétude, ou un rapport jamais lu.
+  // On ne bascule dans la branche « aucune donnée » que si RIEN de tout cela n'est connu.
+  if (
+    p.sessions_total === 0 &&
+    p.failures.length === 0 &&
+    p.incomplete_rows === 0 &&
+    p.reports_unreadable === 0
+  ) {
+    return (
+      <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
+        <strong>Aucun rapport TLS reçu sur {p.days} jours.</strong> On ne sait donc pas si
+        le chiffrement fonctionne — ce n'est pas la même chose que « tout va bien ».
+        Publiez l'enregistrement <code className="font-mono">_smtp._tls</code> (voir la
+        procédure du domaine) avant de durcir, sinon vous durcirez à l'aveugle.
+      </div>
+    );
+  }
+
+  if (p.safe_to_enforce) {
+    return (
+      <div className="rounded border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+        <strong>
+          {p.sessions_ok.toLocaleString("fr-FR")} sessions sur {p.days} jours, toutes
+          chiffrées, aucun échec.
+        </strong>{" "}
+        Le passage en mode appliqué est sûr.
+        {p.reporters.length > 0 && (
+          <span className="block mt-1 text-emerald-800">
+            D'après : {p.reporters.join(", ")}.
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport), ou des
+  // échecs connus par le détail seul (le résumé qui les aurait comptés a été rejeté par la
+  // normalisation), ou un rapport entier jamais lu (reports_unreadable), ou aucun de ces
+  // signaux : cinq situations distinctes qui font toutes échouer safe_to_enforce, et
+  // qu'on ne confond jamais entre elles. On ne dit « données incomplètes » que si
+  // p.incomplete_rows > 0 le confirme réellement — jamais par déduction du seul fait
+  // qu'on est arrivé dans cette branche (rien ne garantit ce lien côté TypeScript). La
+  // phrase de clôture diffère selon la branche : quand il y a des échecs connus (comptés
+  // OU seulement décrits dans `failures`), on peut en parler comme d'un fait. Quand il y a
+  // de l'incomplétude ou un rapport illisible, on n'affirme que de l'incertitude, pas un
+  // fait. Et quand rien de tout cela n'est établi (résiduel), on se contente de dire que
+  // le feu vert n'est pas garanti — jamais plus que ce que les données montrent.
+  return (
+    <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
+      {p.sessions_failed > 0 ? (
+        <>
+          <strong>
+            {p.sessions_failed.toLocaleString("fr-FR")} session
+            {plural(p.sessions_failed)} en échec de chiffrement sur {p.days} jours
+          </strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). En mode
+          appliqué, ces messages seraient <strong>refusés</strong>. Corrigez d'abord.
+        </>
+      ) : p.incomplete_rows > 0 ? (
+        <>
+          <strong>Aucun échec visible, mais des données incomplètes sur {p.days} jours.</strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). Impossible
+          de garantir qu'aucun message ne serait refusé en mode appliqué : les rapports
+          reçus sont incomplets.
+        </>
+      ) : p.failures.length > 0 ? (
+        <>
+          {/* Le résumé qui aurait dû compter ces sessions a été rejeté par la
+              normalisation (compteur illisible) : sessions_total et sessions_failed
+              restent à 0, mais les lignes de détail, elles, ont survécu et décrivent
+              des échecs réels. On ne dit pas « aucun échec connu » quand la liste
+              ci-dessous en affiche. */}
+          <strong>Des échecs de chiffrement sont connus sur {p.days} jours.</strong>{" "}
+          Aucun résumé exploitable ne les a comptés (compteur illisible), mais le détail
+          ci-dessous les documente. Le passage en mode appliqué ne peut pas être garanti
+          sûr.
+        </>
+      ) : p.reports_unreadable > 0 ? (
+        <>
+          {/* On ne sait PAS que c'était un rapport TLS -- seulement qu'une pièce
+              jointe PRÉTENDAIT en être un (extension .gz/.zip/.xml/.json, ou aucune)
+              et qu'on n'a pas su l'identifier. Ça peut tout aussi bien être un
+              rapport DMARC illisible : profile_id NULL ne distingue pas les deux
+              (voir tls_posture.py). Dire "un rapport TLS reçu" affirmerait une
+              certitude qu'on n'a pas -- exactement ce que ce module promet de ne
+              jamais faire. Idem pour "jamais atteint les chiffres" : un rapport
+              `partial` a, lui, une partie de son contenu qui a réellement compté
+              plus haut -- seule la partie rejetée par le normaliseur ne s'y trouve
+              pas (voir le commentaire de `reports_unreadable` dans tls_posture.py). */}
+          <strong>
+            Aucun échec visible, mais {p.reports_unreadable} pièce
+            {plural(p.reports_unreadable)} jointe{plural(p.reports_unreadable)} qui{" "}
+            {p.reports_unreadable > 1 ? "prétendaient" : "prétendait"} être un rapport{" "}
+            {p.reports_unreadable > 1 ? "n'ont" : "n'a"} pas pu être{" "}
+            {p.reports_unreadable > 1 ? "lues" : "lue"} entièrement sur {p.days} jours.
+          </strong>{" "}
+          Tout ou partie {p.reports_unreadable > 1 ? "de leur" : "de son"} contenu
+          {plural(p.reports_unreadable)} — échecs éventuels compris — n'a pas pu être
+          pris en compte dans les chiffres ci-dessus : on ne sait donc pas tout, et le
+          passage en mode appliqué ne peut pas être garanti sûr.
+        </>
+      ) : (
+        <>
+          <strong>Le feu vert n'est pas atteint sur {p.days} jours.</strong>{" "}
+          (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées, aucun échec
+          connu, aucune incomplétude constatée, aucun rapport illisible). Le passage en
+          mode appliqué ne peut pas être garanti sûr avec les données disponibles.
+        </>
+      )}
+      {p.incomplete_rows > 0 && (
+        <p className="mt-2">
+          <strong>
+            {p.incomplete_rows} ligne{plural(p.incomplete_rows)} de résumé
+            incomplète{plural(p.incomplete_rows)}
+          </strong>{" "}
+          : un fournisseur a rapporté un résultat sans indiquer combien de sessions il
+          couvrait. Le nombre réel d'échecs peut donc être supérieur à ce qui est affiché
+          ici — on ne peut pas garantir l'exhaustivité.
+        </p>
+      )}
+      {/* Ce paragraphe ne s'affiche QUE si `reports_unreadable` n'est pas déjà le
+          signal principal ci-dessus (branche `p.reports_unreadable > 0` du if/else) :
+          dans ce cas, le titre a DÉJÀ donné le nombre et l'explication, et répéter le
+          même paragraphe ici ferait lire deux fois la même chose à l'exploitant. Ce
+          bloc n'apporte une information NOUVELLE que lorsque reports_unreadable
+          coexiste avec un autre signal principal (échecs, incomplétude, détail) --
+          d'où la condition supplémentaire sur ces trois champs. */}
+      {p.reports_unreadable > 0 &&
+        (p.sessions_failed > 0 || p.incomplete_rows > 0 || p.failures.length > 0) && (
+        <p className="mt-2">
+          <strong>
+            {p.reports_unreadable} pièce{plural(p.reports_unreadable)} jointe
+            {plural(p.reports_unreadable)} qui{" "}
+            {p.reports_unreadable > 1 ? "prétendaient" : "prétendait"} être un rapport{" "}
+            {p.reports_unreadable > 1 ? "n'ont" : "n'a"} pas pu être{" "}
+            {p.reports_unreadable > 1 ? "lues" : "lue"} entièrement
+          </strong>{" "}
+          : tout ou partie {p.reports_unreadable > 1 ? "de leur" : "de son"} contenu
+          {plural(p.reports_unreadable)} n'a pas pu être pris en compte dans les
+          chiffres ci-dessus, y compris les échecs qu'{p.reports_unreadable > 1 ? "elles" : "elle"}{" "}
+          {p.reports_unreadable > 1 ? "portaient" : "portait"} peut-être. Ce silence
+          n'est en aucun cas le signe que tout va bien.
+        </p>
+      )}
+      {p.failures.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {p.failures.map((f, i) => (
+            <li key={i} className="font-mono">
+              {f.result_type} · {formatFailureSessions(f)}
+              {f.sending_mta_ip && <> · depuis {f.sending_mta_ip}</>}
+              {f.receiving_mx_hostname && <> · vers {f.receiving_mx_hostname}</>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Accord du pluriel français, factorisé pour éviter la répétition de `n > 1 ? "s" : ""`.
+function plural(n: number): string {
+  return n > 1 ? "s" : "";
+}
+
+/* sessions === null : la magnitude est inconnue (aucune occurrence lisible dans le
+   rapport) — on ne l'affiche JAMAIS comme « 0 session », ce serait rassurant et faux.
+   partial === true : le nombre est un MINORANT, le vrai total peut être plus élevé. */
+function formatFailureSessions(f: TlsFailure): string {
+  if (f.sessions === null) return "nombre de sessions inconnu";
+  const n = f.sessions.toLocaleString("fr-FR");
+  const suffix = plural(f.sessions);
+  return f.partial ? `au moins ${n} session${suffix}` : `${n} session${suffix}`;
 }

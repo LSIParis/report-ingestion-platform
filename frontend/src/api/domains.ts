@@ -117,6 +117,36 @@ export function useSaveMtaSts(id: string) {
   });
 }
 
+export interface TlsFailure {
+  result_type: string;
+  sessions: number | null; // null = magnitude inconnue (aucune occurrence lisible)
+  partial: boolean; // true = le nombre est un MINORANT, le vrai total peut être plus élevé
+  sending_mta_ip: string | null;
+  receiving_mx_hostname: string | null;
+}
+
+export interface TlsPosture {
+  days: number;
+  sessions_total: number;
+  sessions_ok: number;
+  sessions_failed: number;
+  failures: TlsFailure[]; // trié : magnitudes inconnues en tête, puis volume décroissant
+  incomplete_rows: number; // nb de lignes de résumé dont un compteur manquait
+  // Nb de RAPPORTS TLS entiers (pas de lignes) reçus mais jamais normalisés — donc
+  // invisibles de failures/incomplete_rows/sessions_* (aucune ligne persistée pour
+  // eux). "Je n'ai pas su te lire" ne se lit JAMAIS comme "rien à signaler" : > 0 doit
+  // empêcher tout feu vert, au même titre qu'un échec connu.
+  reports_unreadable: number;
+  safe_to_enforce: boolean;
+  reporters: string[];
+}
+
+export const useTlsPosture = (tenantId: string) =>
+  useQuery({
+    queryKey: ["tls-posture", tenantId],
+    queryFn: () => api<TlsPosture>(`/admin/tenants/${tenantId}/tls-posture`),
+  });
+
 export function useRequeueQuarantine() {
   const qc = useQueryClient();
   return useMutation({

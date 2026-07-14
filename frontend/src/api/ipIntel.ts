@@ -33,6 +33,16 @@ export interface IpIntel {
     spf_domains: string[];
     dkim_domains: string[];
     header_froms: string[];
+    // Somme des sessions TLS en échec vues depuis cette IP. `null` = magnitude
+    // inconnue (au moins un échec observé, mais aucun compteur lisible) ; `0` = aucune
+    // ligne TLS pour cette IP (vrai zéro, pas un défaut). Ne JAMAIS confondre les deux.
+    tls_sessions: number | null;
+    // `true` = tls_sessions (s'il n'est pas null) est un MINORANT : au moins une
+    // occurrence illisible existe en plus de celles comptées.
+    tls_partial: boolean;
+    // Détail par type d'échec (ex. "certificate-host-mismatch"), même convention
+    // sessions/partial que ci-dessus.
+    tls_failures: Record<string, { sessions: number | null; partial: boolean }>;
   };
 }
 

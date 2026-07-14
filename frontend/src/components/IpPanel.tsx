@@ -1,5 +1,29 @@
 import { type IpIntel, useIpIntel, useRefreshIpIntel } from "../api/ipIntel";
 
+type Activity = IpIntel["activity"];
+
+/** Cette IP a-t-elle des lignes TLS (kind="failure") à son actif ? `tls_sessions` ne
+ *  vaut 0 que dans un seul cas : aucune ligne TLS pour cette IP. Un `null` (magnitude
+ *  illisible) reste une activité TLS bien réelle — on ne le confond jamais avec 0. */
+function aDeLActiviteTls(a: Activity): boolean {
+  return a.tls_sessions !== 0 || Object.keys(a.tls_failures).length > 0;
+}
+
+/** Cette IP a-t-elle été évaluée comme expéditeur DMARC (au moins un message compté, ou
+ *  un header_from observé) ? C'est la seule question qui rend un verdict SPF pertinent :
+ *  SPF répond à « qui a le droit d'émettre au nom du domaine », pas « qui a pu nous
+ *  livrer du courrier ». */
+function vueCommeExpediteur(a: Activity): boolean {
+  return a.messages > 0 || a.header_froms.length > 0;
+}
+
+/** IP vue UNIQUEMENT en TLS : elle nous a livré du courrier (ou tenté), elle n'a jamais
+ *  prétendu émettre en notre nom. Un verdict SPF n'a alors aucun sens — l'appliquer
+ *  reviendrait à accuser à tort un MTA de livraison honnête. */
+function vueUniquementEnTls(a: Activity): boolean {
+  return aDeLActiviteTls(a) && !vueCommeExpediteur(a);
+}
+
 /** Le verdict, en une phrase — c'est la seule chose que beaucoup liront.
  *
  * Identification et autorisation sont INDÉPENDANTES : « SendGrid, mais votre SPF ne
@@ -8,6 +32,18 @@ import { type IpIntel, useIpIntel, useRefreshIpIntel } from "../api/ipIntel";
 function verdict(d: IpIntel): { titre: string; ton: "danger" | "warn" | "ok" } {
   const autorise = d.spf.result === "pass";
   const nom = d.sender?.name;
+
+  // Voir vueUniquementEnTls() : sur une IP qui ne nous a jamais servi d'expéditeur, le
+  // verdict qui compte est le TLS, pas le SPF. Priorité sur toute la logique SPF
+  // ci-dessous, qu'on ne réécrit pas mais qu'on ne laisse pas parler à tort.
+  if (vueUniquementEnTls(d.activity)) {
+    return {
+      titre: nom
+        ? `${nom} — échecs de session TLS vers votre domaine (SPF non applicable)`
+        : "MTA de livraison — échecs de session TLS vers votre domaine (SPF non applicable)",
+      ton: "danger",
+    };
+  }
 
   // « Aucun SPF publié » n'est PAS « le SPF refuse cette IP ». Les deux mènent au même
   // échec, mais pas au même geste : dans un cas on ajoute un mécanisme, dans l'autre on
@@ -104,6 +140,12 @@ export function IpPanel({ ip, onClose }: { ip: string; onClose: () => void }) {
                   ({data.spf.mechanism})
                 </span>
               )}
+              {vueUniquementEnTls(data.activity) && (
+                <span className="ml-1 text-xs text-gray-500">
+                  — non applicable : cette IP ne vous a jamais envoyé de courrier en
+                  votre nom, elle vous a livré du courrier (ou tenté) via TLS.
+                </span>
+              )}
             </Fait>
             {data.hosted_by && (
               <Fait label="Hébergement">
@@ -132,10 +174,45 @@ export function IpPanel({ ip, onClose }: { ip: string; onClose: () => void }) {
             <Fait label="Domaines usurpés">
               {data.activity.header_froms.join(", ") || "—"}
             </Fait>
+            {aDeLActiviteTls(data.activity) && (
+              <>
+                <Fait label="Sessions TLS en échec">
+                  {formatTlsSessions(data.activity)}
+                </Fait>
+                {Object.keys(data.activity.tls_failures).length > 0 && (
+                  <Fait label="Types d'échec">
+                    {Object.entries(data.activity.tls_failures)
+                      .map(([type, v]) => `${type} : ${formatTlsCount(v)}`)
+                      .join(" · ")}
+                  </Fait>
+                )}
+              </>
+            )}
           </Section>
 
           <Section titre="Que faire">
-            {data.sender ? (
+            {aDeLActiviteTls(data.activity) && (
+              // Sur une IP en enforce, « il n'y a rien à faire » serait faux : le
+              // courrier de ce MTA serait purement et simplement refusé. On le dit,
+              // qu'un expéditeur connu corresponde ou non.
+              <p className="text-sm leading-relaxed mb-2">
+                Ce serveur n'arrive pas à établir de session TLS vérifiée vers votre
+                domaine. En mode appliqué (MTA-STS <code className="font-mono">enforce</code>),
+                son courrier serait <strong>refusé</strong>, sans alerte de votre côté.
+                Avant de durcir, comprenez pourquoi : certificat expiré, non couvrant, ou
+                nom de serveur MX qui ne correspond pas à la politique publiée.
+              </p>
+            )}
+            {vueUniquementEnTls(data.activity) ? (
+              // `sender.remediation` est TOUJOURS une instruction SPF/DKIM (« Ajoutez
+              // include:... à votre SPF »). Sur une IP vue UNIQUEMENT en TLS, ce
+              // conseil n'a aucun sens : elle ne prétend pas émettre en votre nom, le
+              // paragraphe ci-dessus l'a déjà dit. L'afficher pousserait à élargir un
+              // SPF sans aucune raison, trois lignes après avoir dit que le SPF ne
+              // s'applique pas. Le conseil qui compte ici porte sur le chiffrement
+              // (déjà donné plus haut) : rien à ajouter dans cette section.
+              null
+            ) : data.sender ? (
               <p className="text-sm leading-relaxed">{data.sender.remediation}</p>
             ) : (
               <p className="text-sm leading-relaxed text-gray-700">
@@ -161,6 +238,19 @@ export function IpPanel({ ip, onClose }: { ip: string; onClose: () => void }) {
       )}
     </aside>
   );
+}
+
+/* sessions === null : magnitude inconnue — jamais affiché comme "0", ce serait rassurant
+   et faux. partial === true : le nombre est un MINORANT, le vrai total peut être plus
+   élevé. Même convention que MtaStsPanel.tsx (formatFailureSessions). */
+function formatTlsCount(v: { sessions: number | null; partial: boolean }): string {
+  if (v.sessions === null) return "nombre inconnu";
+  const n = v.sessions.toLocaleString("fr-FR");
+  return v.partial ? `au moins ${n}` : n;
+}
+
+function formatTlsSessions(a: Activity): string {
+  return formatTlsCount({ sessions: a.tls_sessions, partial: a.tls_partial });
 }
 
 function Section({ titre, children }: { titre: string; children: React.ReactNode }) {

@@ -3,7 +3,7 @@ Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture E
 """
 import pytest
 
-from app.db.models import Email, Report
+from app.db.models import Email, ParsingError, Report
 from app.db.session import get_session, tenant_scoped_session
 
 
@@ -64,5 +64,125 @@ def test_ip_vue_par_b_est_invisible_de_a(seed_two_tenants):
         with get_session() as db:
             db.query(ReportRow).filter(
                 ReportRow.data["source_ip"].astext == "198.51.100.42").delete(
+                synchronize_session=False)
+            db.commit()
+
+
+def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
+    """`tls_posture.posture()` alimente l'ecran qui autorise le passage de MTA-STS en
+    `enforce` -- une lecture agregee de report_row, comme les autres, doit rester
+    filtree par la RLS. Sans ce test bloquant, une regression future dans `posture()`
+    (ex. un `bypass=True` ajoute par erreur, ou une session non scopee) ne serait
+    detectee par aucun test bloquant : A verrait la posture TLS de B, et pourrait
+    durcir `enforce` sur la foi de donnees qui ne sont pas les siennes.
+    """
+    from datetime import date
+
+    from app.db.models import ReportRow
+    from app.services.tls_posture import posture
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:  # plan worker : on seme chez B
+        rep_b = db.query(Report).filter_by(tenant_id=tid_b).first()
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id, data={
+            "kind": "summary", "report_date": date.today().isoformat(),
+            "policy_domain": "tenant-b-test.com",
+            "successful_sessions": 100, "failed_sessions": 5}))
+        # Une ligne `failure` aussi -- pas seulement un `summary`. Sans elle, ce test
+        # ne prouvait que la moitie de l'isolation : `sessions_total` (issu des seules
+        # lignes `summary`) pouvait bien rester a 0 chez A pendant qu'une regression
+        # future laisserait fuiter les lignes `failure` de B dans `p["failures"]`,
+        # sans qu'aucun test bloquant ne s'en apercoive.
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id, data={
+            "kind": "failure", "report_date": date.today().isoformat(),
+            "policy_domain": "tenant-b-test.com",
+            "result_type": "certificate-expired",
+            "sending_mta_ip": "203.0.113.44",
+            "receiving_mx_hostname": "mx.tenant-b-test.com",
+            "failure_sessions": 3}))
+        # Un rapport TLS de B, entier, jamais lu (`reports_unreadable` -- voir
+        # `tls_posture.py`). Il ne laisse AUCUNE ReportRow, donc les deux assertions
+        # ci-dessus ne peuvent pas le voir : sans cette troisieme ligne de semis,
+        # une regression future qui ferait fuiter `reports_unreadable` de B vers A
+        # (ex. un `bypass=True` ajoute par erreur) ne serait detectee par aucun test
+        # bloquant.
+        rep_b_illisible = Report(tenant_id=tid_b, email_id=rep_b.email_id,
+                                 source_type="attachment", status="failed",
+                                 profile_id="_default_tlsrpt_json")
+        db.add(rep_b_illisible)
+        db.flush()
+        rep_b_illisible_id = str(rep_b_illisible.id)
+
+        # ParsingError chez B, du code que la sous-requete EXISTS de
+        # `reports_unreadable` doit justement EXCLURE du compte
+        # (`_CODES_ECARTES_A_JUSTE_TITRE`, voir tls_posture.py). Avant ce correctif,
+        # aucun test bloquant ne semait de ParsingError chez B : une regression qui
+        # romprait la correlation sur `report_id` (ex. un `ParsingError.code.in_(...)`
+        # ecrit SANS la jointure sur `Report.id`, qui rendrait la sous-requete VRAIE
+        # pour n'importe quel rapport des qu'un SEUL ParsingError du bon code existe
+        # QUELQUE PART en base -- y compris chez un autre tenant) ne serait detectee
+        # par aucun test bloquant. Ce semis force cette sous-requete a s'executer sur
+        # des donnees d'un AUTRE tenant que celui qui lit sa posture, exactement le
+        # scenario ou une telle regression se verrait.
+        rep_b_usurpe = Report(tenant_id=tid_b, email_id=rep_b.email_id,
+                              source_type="attachment", status="failed",
+                              profile_id="_default_tlsrpt_json")
+        db.add(rep_b_usurpe)
+        db.flush()
+        db.add(ParsingError(tenant_id=tid_b, email_id=rep_b.email_id,
+                            report_id=rep_b_usurpe.id, severity="fatal",
+                            code="DMARC_DOMAIN_MISMATCH",
+                            message="rapport concernant un autre domaine, rejete"))
+        rep_b_usurpe_id = str(rep_b_usurpe.id)
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:  # A lit sa propre posture
+            p = posture(db, days=30)
+            assert p["sessions_total"] == 0, "A voit des sessions TLS de B"
+            assert p["failures"] == [], "A voit les echecs detailles de B"
+            assert p["reports_unreadable"] == 0, (
+                "A voit un rapport TLS illisible de B, ou la sous-requete EXISTS "
+                "sur ParsingError fuite entre tenants")
+    finally:
+        with get_session() as db:
+            db.query(ParsingError).filter_by(report_id=rep_b_usurpe_id).delete(
+                synchronize_session=False)
+            db.query(ReportRow).filter(
+                ReportRow.data["policy_domain"].astext == "tenant-b-test.com").delete(
+                synchronize_session=False)
+            db.query(Report).filter(Report.id.in_(
+                [rep_b_illisible_id, rep_b_usurpe_id])).delete(
+                synchronize_session=False)
+            db.commit()
+
+
+def test_ip_TLS_vue_par_b_est_invisible_de_a(seed_two_tenants):
+    """Même principe que pour une IP DMARC : le contrôle d'appartenance de /ip-intel
+    interroge maintenant DEUX champs. Il doit rester aveugle aux lignes des autres.
+    """
+    from app.db.models import ReportRow
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:
+        rep_b = db.query(Report).filter_by(tenant_id=tid_b).first()
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id,
+                         data={"kind": "failure", "sending_mta_ip": "198.51.100.77",
+                               "result_type": "starttls-not-supported",
+                               "failure_sessions": 9}))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:
+            vues = (db.query(ReportRow)
+                      .filter(ReportRow.data["sending_mta_ip"].astext == "198.51.100.77")
+                      .all())
+            assert vues == [], "A voit une ligne TLS de B"
+    finally:
+        with get_session() as db:
+            db.query(ReportRow).filter(
+                ReportRow.data["sending_mta_ip"].astext == "198.51.100.77").delete(
                 synchronize_session=False)
             db.commit()
