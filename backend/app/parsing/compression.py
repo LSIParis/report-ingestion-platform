@@ -30,10 +30,23 @@ def decompress(raw: bytes) -> bytes:
         return _bounded_read(gzip.GzipFile(fileobj=io.BytesIO(raw)))
 
     if raw[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        # Contrat de cette fonction : ne jamais laisser fuir autre chose que
+        # DecompressionTooLarge, ValueError ou OSError — tous les appelants (adaptateur
+        # DMARC, adaptateur TLS-RPT, détecteur de format) se fient à ce contrat pour
+        # écrire un ParseResult(status="failed") plutôt que de faire tomber tout l'email.
+        # Piège : zipfile.BadZipFile N'HÉRITE PAS DE ValueError (son MRO est
+        # BadZipFile -> Exception -> BaseException), contre-intuitif vu son nom. Sans
+        # cette traduction explicite, une archive structurellement invalide (en-tête
+        # PK mais contenu corrompu) remonterait telle quelle et échapperait au
+        # `except (..., ValueError, OSError)` des appelants.
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"zip corrompu : {exc}") from exc
+        with zf as z:
             # Un rapport (XML pour DMARC, JSON pour TLS-RPT) : on ne devine pas le
-            # format d'une entrée d'extension inconnue, on la rejette (invariant §6 —
-            # dans le doute, on ne traite pas).
+            # format d'une entrée d'extension inconnue, on la rejette — dans le doute,
+            # on ne traite pas plutôt que de risquer de mal interpréter le contenu.
             names = [n for n in z.namelist() if n.lower().endswith((".xml", ".json"))]
             if not names:
                 raise ValueError("archive zip sans fichier .xml ou .json")

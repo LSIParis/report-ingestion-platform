@@ -49,3 +49,14 @@ def test_bombe_gzip_est_bornee():
     bombe = gzip.compress(b"\0" * (200 * 1024 * 1024))
     with pytest.raises(DecompressionTooLarge):
         decompress(bombe)
+
+
+def test_zip_corrompu_leve_une_erreur_rattrapable():
+    # zipfile.BadZipFile n'hérite PAS de ValueError (son MRO est BadZipFile ->
+    # Exception -> BaseException). Le contrat de decompress() est de ne jamais laisser
+    # fuir autre chose que DecompressionTooLarge, ValueError ou OSError : un appelant
+    # qui fait `except (..., ValueError, OSError)` ne doit jamais voir passer un ZIP
+    # cassé sous une autre forme.
+    entete_pk_mais_structure_invalide = b"PK\x03\x04" + b"\x00" * 40
+    with pytest.raises(ValueError):
+        decompress(entete_pk_mais_structure_invalide)
