@@ -3,7 +3,7 @@ Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture E
 """
 import pytest
 
-from app.db.models import Email, ParsingError, Report
+from app.db.models import Alert, Email, ParsingError, Report
 from app.db.session import get_session, tenant_scoped_session
 
 
@@ -24,6 +24,31 @@ def test_forged_insert_for_other_tenant_is_rejected(seed_two_tenants):
         with pytest.raises(Exception):
             db.flush()  # WITH CHECK doit rejeter l'écriture cross-tenant
         # Après l'erreur attendue, la transaction est en échec : on la nettoie pour
+        # que le context manager puisse se refermer proprement.
+        db.rollback()
+
+
+def test_forged_alert_insert_for_other_tenant_is_rejected(seed_two_tenants):
+    """Meme preuve que pour Report, mais pour `alert` (migration 0007) : une alerte
+    estampillee du tenant B, ecrite depuis une session scopee sur le tenant A, doit
+    etre rejetee -- pas seulement la lecture (USING), aussi l'ecriture forgee.
+
+    Verifie en direct (ALTER POLICY temporaire sur la base de dev, voir le rapport de
+    tache) : neutraliser SEULEMENT le WITH CHECK (le mettre a `true`) ne fait PAS
+    echouer ce test -- l'INSERT ORM demande un RETURNING (a cause de `opened_at`,
+    server_default), et Postgres applique alors aussi le USING sur la ligne retournee ;
+    l'ecriture cross-tenant est donc rejetee par ce filet de securite meme si le WITH
+    CHECK est casse. Le test ne devient rouge que si USING **et** WITH CHECK sont
+    neutralises ensemble (policy entierement cassee) -- confirme en direct. Ce test
+    protege donc contre une regression sur la policy dans son ensemble ; il ne peut pas
+    a lui seul distinguer laquelle des deux clauses a failli.
+    """
+    tid_a, tid_b = seed_two_tenants
+    with tenant_scoped_session(tenant_id=tid_a) as db:
+        db.add(Alert(tenant_id=tid_b, kind="silent_domain", severity="critical"))
+        with pytest.raises(Exception):
+            db.flush()  # la policy (USING+WITH CHECK) doit rejeter l'ecriture cross-tenant
+        # Apres l'erreur attendue, la transaction est en echec : on la nettoie pour
         # que le context manager puisse se refermer proprement.
         db.rollback()
 
