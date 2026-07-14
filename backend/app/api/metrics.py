@@ -24,6 +24,18 @@ _disposition = ReportRow.data["disposition"].astext  # none | quarantine | rejec
 _source_ip = ReportRow.data["source_ip"].astext
 _reporter = ReportRow.data["reporter"].astext
 
+# `report_row` porte à la fois les lignes DMARC et les lignes TLS-RPT (même table,
+# voulu). Le profil TLS (`_default_tlsrpt_json.json`) ne connaît ni `source_ip`, ni
+# `message_count`, ni `aligned` : ces clés sont ABSENTES de `data` pour une ligne TLS,
+# donc `data->>'source_ip'` y vaut toujours NULL. Le profil DMARC (`_default_dmarc_xml
+# .json`), lui, marque `source_ip` `required`. C'est donc un critère fiable pour
+# distinguer les deux familles. SANS ce filtre, les lignes TLS entrent quand même
+# dans les GROUP BY source_ip : elles forment un groupe unique à l'IP NULL, compté
+# comme une "source" qui n'authentifie jamais rien (aucune de ses colonnes DMARC
+# n'existe) — une source fantôme dans le tableau de bord. Ne PAS supprimer ce filtre :
+# il n'est pas redondant, même si aucune ligne TLS n'est visible dans un test donné.
+_est_une_ligne_dmarc = _source_ip.isnot(None)
+
 
 def _msgs_where(condition):
     """Somme des messages vérifiant une condition (0 sinon)."""
@@ -79,14 +91,14 @@ def dmarc_summary(days: int = Query(30, ge=1, le=365), db=Depends(get_db)):
         _msgs_where(_disposition == "quarantine").label("quarantined"),
         _msgs_where(_disposition == "reject").label("rejected"),
         func.count(func.distinct(_source_ip)).label("sources"),
-    ).filter(_since(days)).one()
+    ).filter(_since(days), _est_une_ligne_dmarc).one()
 
     messages = int(row.messages)
     compliant = int(row.compliant)
     # Sources dont AUCUN message n'est authentifié : ce sont elles qu'il faut traiter.
     failing_sources = (
         db.query(_source_ip)
-          .filter(_since(days))
+          .filter(_since(days), _est_une_ligne_dmarc)
           .group_by(_source_ip)
           .having(_msgs_where(_aligned == "pass") == 0)
           .count()
@@ -116,7 +128,7 @@ def dmarc_timeseries(days: int = Query(30, ge=1, le=365), db=Depends(get_db)):
                 _msgs_where(_aligned == "pass").label("compliant"),
                 _msgs_where(_aligned != "pass").label("failing"),
             )
-            .filter(_since(days))
+            .filter(_since(days), _est_une_ligne_dmarc)
             .group_by(ReportRow.report_date)
             .order_by(ReportRow.report_date)
             .all())
@@ -137,7 +149,7 @@ def dmarc_sources(days: int = Query(30, ge=1, le=365),
                 func.max(ReportRow.report_date).label("last_seen"),
                 func.min(_reporter).label("reporter"),
             )
-            .filter(_since(days))
+            .filter(_since(days), _est_une_ligne_dmarc)
             .group_by(_source_ip)
             .order_by(func.coalesce(func.sum(_msgs), 0).desc())
             .limit(limit)

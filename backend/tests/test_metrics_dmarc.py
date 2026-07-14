@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.metrics import router
-from app.auth.deps import get_db
+from app.auth.middleware import TenantContext
 from app.db.models import Email, Report, ReportRow, Tenant
 from app.db.session import get_session
 
@@ -87,19 +87,80 @@ def dataset():
         db.commit()
 
 
+def _tls_row(tenant_id, report_id, day, kind="summary"):
+    """Ligne telle que la normalisation TLS-RPT la produit réellement (voir
+    `profiles/_default_tlsrpt_json.json`) : ce profil ne connaît ni `source_ip`, ni
+    `message_count`, ni `aligned` — ces clés du DMARC sont simplement ABSENTES de
+    `data`, donc `data->>'source_ip'` vaut NULL en SQL, exactement comme dans un vrai
+    rapport TLS ingéré en base."""
+    return ReportRow(
+        tenant_id=tenant_id, report_id=report_id, report_date=day,
+        data={
+            "kind": kind,
+            "reporter": "google.com",
+            "policy_domain": "metrics.test",
+            "successful_sessions": 42,
+            "failed_sessions": 3,
+        },
+    )
+
+
+@pytest.fixture
+def dataset_avec_lignes_tls(dataset):
+    """Le MÊME tenant que `dataset`, auquel on ajoute deux lignes TLS-RPT (kind=summary
+    et kind=failure). Sert à prouver que les métriques DMARC les ignorent : les
+    chiffres doivent rester rigoureusement identiques à ceux de `dataset` seul — pas
+    de source fantôme à l'IP nulle, pas de message ni de source comptés en trop.
+    """
+    tid = dataset
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-{uuid.uuid4()}",
+                   from_address="tls-reports@google.com", subject="tls",
+                   received_at=datetime.now(timezone.utc), raw_object_key="raw/tls.json",
+                   status="parsed_ok")
+        db.add(em)
+        db.flush()
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok")
+        db.add(rep)
+        db.flush()
+        db.add_all([
+            _tls_row(tid, rep.id, TODAY, "summary"),
+            _tls_row(tid, rep.id, TODAY, "failure"),
+        ])
+        db.commit()
+
+    yield tid
+    # Pas de nettoyage ici : la teardown de `dataset` supprime tout ce qui porte ce
+    # tenant_id (Report/Email/ReportRow), pas seulement le report d'origine.
+
+
+def _client_for(tid):
+    """Monte les routes de métriques avec un VRAI contexte tenant (RLS active,
+    bypass=False) : même montage que `test_admin_domains.py` / `test_ip_intel_api.py`.
+
+    On ne court-circuite plus `get_db` par une session `get_session()` (plan worker,
+    BYPASSRLS) : cela rendait le test sensible à TOUTES les lignes de la base,
+    cross-tenant y compris — non déterministe, et faussement "vert" ou "rouge" selon
+    ce qui traînait ailleurs. Ici on teste l'agrégation d'UN tenant, pas le contenu
+    de la base entière ; l'authentification elle-même est couverte par
+    `test_middleware_isolation.py`.
+    """
+    app = FastAPI()
+    ctx = TenantContext(user="metrics-test@example.test", role="tenant_viewer",
+                        tenant_ids=(tid,), active_tenant=tid, bypass=False)
+
+    @app.middleware("http")
+    async def inject_ctx(request, call_next):
+        request.state.tenant = ctx
+        return await call_next(request)
+
+    app.include_router(router)
+    return TestClient(app)
+
+
 @pytest.fixture
 def client(dataset):
-    """Monte les routes de métriques en court-circuitant le middleware : ici on teste
-    l'agrégation, pas l'authentification (couverte par test_middleware_isolation)."""
-    app = FastAPI()
-    app.include_router(router)
-
-    def _db():
-        with get_session() as s:      # plan worker : voit le tenant du dataset
-            yield s
-
-    app.dependency_overrides[get_db] = _db
-    return TestClient(app)
+    return _client_for(dataset)
 
 
 def test_summary_raisonne_en_messages_et_non_en_lignes(client):
@@ -159,3 +220,32 @@ def test_sources_triees_par_volume_avec_taux(client):
     assert bad["messages"] == 510 and bad["compliant"] == 0
     assert bad["compliance_rate"] == 0.0        # ici 0 % est une vraie mesure
     assert bad["last_seen"] == (TODAY - timedelta(days=2)).isoformat()
+
+
+def test_lignes_tls_ignorees_par_les_metriques_dmarc(dataset_avec_lignes_tls):
+    """LE bug : un tenant qui reçoit à la fois des rapports DMARC et TLS-RPT ne doit
+    voir AUCUNE ligne TLS entrer dans ses métriques DMARC. Sans filtre, les 2 lignes
+    TLS ajoutées ici (source_ip absent -> NULL) forment un groupe GROUP BY source_ip
+    supplémentaire : une "source" fantôme à l'IP nulle, comptée comme défaillante
+    puisqu'aucun message n'y est authentifié.
+
+    Les chiffres doivent être IDENTIQUES à ceux du test `dataset` seul (sans lignes
+    TLS) : 5 610 messages, 5 100 authentifiés, 3 sources, 1 seule source défaillante.
+    """
+    tid = dataset_avec_lignes_tls
+    client = _client_for(tid)
+
+    s = client.get("/metrics/dmarc/summary?days=30").json()
+    assert s["messages"] == 5610
+    assert s["compliant"] == 5100
+    assert s["failing"] == 510
+    assert s["sources"] == 3
+    assert s["failing_sources"] == 1     # pas 2 : pas de source fantôme à l'IP nulle
+
+    sources = client.get("/metrics/dmarc/sources?days=30").json()
+    assert len(sources) == 3
+    assert all(r["source_ip"] is not None for r in sources)
+
+    ts = client.get("/metrics/dmarc/timeseries?days=30").json()
+    total_msgs = sum(p["compliant"] + p["failing"] for p in ts)
+    assert total_msgs == 5610             # les 2 lignes TLS n'ajoutent aucun "jour" ni message
