@@ -1,10 +1,13 @@
 """Test d'isolation cross-tenant. DOIT passer — bloquant en CI.
 Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture ET écriture.
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from app.db.models import Alert, Email, ParsingError, Report
+from app.db.models import Alert, Email, ParsingError, Report, Tenant
 from app.db.session import get_session, tenant_scoped_session
+from app.workers import tasks
 
 
 def test_tenant_a_cannot_read_tenant_b(seed_two_tenants):
@@ -235,4 +238,64 @@ def test_les_alertes_d_un_tenant_sont_invisibles_de_l_autre(seed_two_tenants):
     finally:
         with get_session() as db:
             db.query(Alert).filter_by(tenant_id=tid_b).delete()
+            db.commit()
+
+
+def test_le_balayage_scope_bien_chaque_tenant(seed_two_tenants, monkeypatch):
+    """Le risque phare de ce chantier, dans le fichier BLOQUANT : les détecteurs
+    d'alerte (`app/services/alerting/detectors/`) n'ont AUCUN filtre `tenant_id`
+    applicatif -- ils comptent entièrement sur la RLS (CLAUDE.md). `reconcile_tenant`
+    (`app/workers/tasks.py`) DOIT donc leur ouvrir une session scopée par tenant
+    (`tenant_scoped_session`), jamais la session worker (`get_session()`, BYPASSRLS).
+
+    Copie volontaire, dans le fichier bloquant, de
+    `test_le_balayage_scope_bien_chaque_tenant` de `tests/test_alert_sweep.py` --
+    redondance assumée sur un test de sécurité (voir le rapport de tâche). Si ce
+    correctif venait à être défait (un `reconcile_tenant` rebranché sur `get_session()`),
+    ce fichier bloquant doit, lui aussi, virer au rouge.
+
+    `seed_two_tenants` donne à CHAQUE tenant un rapport frais -- on casse volontairement
+    cette symétrie pour rendre le test discriminant : A perd son unique rapport et
+    devient donc, seul des deux, un domaine qui n'a JAMAIS parlé. Les deux tenants sont
+    vieillis au-delà du délai de grâce (`alert_onboarding_grace_days`), sinon le
+    détecteur `never_reported` ne se prononce jamais, quel que soit l'état des rapports.
+
+    Sous RLS correcte, `reconcile_tenant(tid_a)` ouvre une session qui ne voit AUCUN
+    rapport (ni le sien -- il n'en a plus -- ni celui de B) -> `never_reported` se lève.
+    Sous bypass (le bug), la même requête verrait AUSSI le rapport de B ->
+    `db.query(Report.id).first()` ne serait plus None -> A ne lèverait RIEN. C'est cette
+    différence de COMPORTEMENT -- pas la valeur de `tenant_id` sur l'alerte -- que ce
+    test attrape (`db.get(Tenant, tenant_id)` renverrait le bon tenant même sous bypass).
+
+    PREUVE (voir le rapport de tâche) : ce test est ROUGE quand `reconcile_tenant` est
+    temporairement branché sur `get_session()` (bypass) au lieu de
+    `tenant_scoped_session(...)`, et VERT une fois le code correct remis en place.
+    """
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
+    tid_a, tid_b = seed_two_tenants
+
+    vieux = datetime.now(timezone.utc) - timedelta(days=30)
+    with get_session() as db:  # plan worker : préparation du scénario, pas le test lui-même
+        db.query(Report).filter_by(tenant_id=tid_a).delete(synchronize_session=False)
+        db.get(Tenant, tid_a).created_at = vieux
+        db.get(Tenant, tid_b).created_at = vieux
+        db.commit()
+
+    try:
+        tasks.reconcile_tenant(tid_a)
+        tasks.reconcile_tenant(tid_b)
+
+        with get_session() as db:  # lecture système -- seulement pour VÉRIFIER le résultat
+            alertes_a = db.query(Alert).filter_by(tenant_id=tid_a).all()
+            alertes_b = db.query(Alert).filter_by(tenant_id=tid_b).all()
+
+        assert [a.kind for a in alertes_a] == ["never_reported"]
+        assert str(alertes_a[0].tenant_id) == tid_a
+        assert alertes_a[0].payload["domain"] == "tenant-a-test.com"  # PAS le domaine de B
+
+        assert alertes_b == []   # B a un rapport frais : rien à lever pour lui
+    finally:
+        with get_session() as db:
+            db.query(Alert).filter_by(tenant_id=tid_a).delete(synchronize_session=False)
+            db.query(Alert).filter_by(tenant_id=tid_b).delete(synchronize_session=False)
             db.commit()

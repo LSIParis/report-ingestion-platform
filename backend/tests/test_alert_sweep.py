@@ -189,6 +189,53 @@ def test_un_webhook_en_panne_ne_casse_pas_le_balayage(deux_domaines, monkeypatch
         assert len(_alertes(tid)) == 1     # l'alerte est bien en base
 
 
+def test_le_rattrapage_ne_grossit_pas_sans_borne_sans_webhook_configure(
+        deux_domaines, monkeypatch):
+    """« Pas de canal configuré » n'est pas une panne à retenter -- c'est un état
+    STABLE, déjà journalisé par `webhook.envoyer` (`alerting.webhook_non_configure`),
+    qu'on constate une fois et qu'on ne remet plus dans le filet de rattrapage.
+
+    AVANT ce correctif, `_notifier_un_evenement` ne posait `opened_notified_at` /
+    `closed_notified_at` QUE si `envoye` était vrai -- or `envoyer()` renvoie False
+    (sans lever) quand `ALERT_WEBHOOK_URL` est vide, le cas par défaut. Ces colonnes
+    restaient donc NULL pour toujours, et `fermetures_manquees` / `ouvertures_manquees`
+    (dans `reconcile_tenant`) reprenaient la MÊME alerte à CHAQUE balayage -- un batch
+    qui grossit sans borne sur une plateforme qui n'a jamais configuré de webhook.
+
+    On simule ici le VRAI corps de `notify_alerts` (comme
+    `test_une_aggravation_de_severite_notifie_la_fermeture_avant_l_ouverture` : `.delay`
+    est indisponible sous `--no-deps`, donc remplacé par un appel direct au callable
+    Celery) pour que `_notifier_un_evenement` s'exécute réellement, avec un webhook
+    délibérément NON configuré.
+    """
+    monkeypatch.setattr(tasks.webhook.settings, "alert_webhook_url", "")
+    monkeypatch.setattr(tasks.notify_alerts, "delay", tasks.notify_alerts)
+    tid_a, tid_b = deux_domaines
+
+    tasks.sweep_alerts()          # premier passage : ouvre les alertes ET tente de notifier
+
+    alert_ids = []
+    for tid in (tid_a, tid_b):
+        alertes = _alertes(tid)
+        assert len(alertes) == 1
+        # « Traitée » : la colonne est posée même si RIEN n'a été envoyé sur le fil --
+        # c'est précisément ce qui la sort du filet de rattrapage.
+        assert alertes[0].opened_notified_at is not None
+        alert_ids.append(str(alertes[0].id))
+
+    # Second balayage : ces deux alertes ne doivent PLUS être reprises par le
+    # rattrapage (elles pourraient rester présentes dans `evenements` d'un AUTRE
+    # tenant de la base -- non pertinent ici -- d'où un test sur l'ABSENCE de nos ids
+    # précis, pas sur un batch vide).
+    ouvertures = []
+    monkeypatch.setattr(tasks.notify_alerts, "delay", ouvertures.extend)
+
+    tasks.sweep_alerts()
+
+    repris = [aid for (_event, aid) in ouvertures]
+    assert not any(aid in repris for aid in alert_ids)
+
+
 def test_le_rattrapage_n_ajoute_pas_deux_fois_une_alerte_fraichement_ouverte(
         deux_domaines, monkeypatch):
     """Une alerte tout juste ouverte CE cycle a, par construction, `opened_notified_at`

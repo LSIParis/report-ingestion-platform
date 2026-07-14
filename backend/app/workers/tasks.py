@@ -275,14 +275,27 @@ def _notifier_un_evenement(db, event: str, alert_id: str) -> None:
     if deja_notifiee is not None:
         return
 
-    envoye = webhook.envoyer(event, alerte, tenant)   # peut lever WebhookIndisponible
-    if envoye:
-        now = datetime.now(timezone.utc)
-        if event == "opened":
-            alerte.opened_notified_at = now
-        else:
-            alerte.closed_notified_at = now
-        db.commit()
+    # `envoyer()` peut lever `WebhookIndisponible` (canal CONFIGURÉ mais EN PANNE) : dans
+    # ce cas, l'exception remonte à travers cette fonction AVANT d'atteindre les lignes
+    # suivantes -- la colonne *_notified_at reste NULL et l'événement repart bien au
+    # prochain balayage. C'est le seul cas qu'on retente.
+    #
+    # `envoyer()` renvoie False dans un seul autre cas : `ALERT_WEBHOOK_URL` n'est pas
+    # configurée (voir `webhook.envoyer`). Ce n'est PAS une panne : « pas de canal
+    # configuré » est un état STABLE, déjà journalisé (dans `webhook.envoyer`) -- inutile
+    # de le reconstater à chaque cycle. On pose donc la colonne *_notified_at qu'on ait
+    # RÉELLEMENT envoyé, ou délibérément PAS envoyé faute de canal : c'est précisément ce
+    # qui sort l'événement du filet de rattrapage (`fermetures_manquees` /
+    # `ouvertures_manquees` dans `reconcile_tenant`). Sans cette distinction, ce filet
+    # reprendrait la MÊME alerte à CHAQUE balayage -- un batch qui grossit sans borne sur
+    # une plateforme qui n'a jamais configuré de webhook (le cas par défaut).
+    webhook.envoyer(event, alerte, tenant)
+    now = datetime.now(timezone.utc)
+    if event == "opened":
+        alerte.opened_notified_at = now
+    else:
+        alerte.closed_notified_at = now
+    db.commit()
 
 
 # ---------------- helpers ----------------
