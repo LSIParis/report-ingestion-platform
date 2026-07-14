@@ -4,13 +4,15 @@ Deux règles non négociables :
  - **il ne casse jamais le flux métier** (même règle que `audit()`) ;
  - **non configuré ≠ silencieux** : une URL vide est journalisée, jamais avalée.
 """
+import http.server
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 
 import pytest
+import structlog.testing
 
-from app.db.models import Alert, Tenant  # noqa: F401 — documente le contrat (types reels)
 from app.services.alerting import webhook
 
 
@@ -41,13 +43,27 @@ def test_le_corps_dit_ce_qui_s_est_passe():
     json.dumps(c)                                   # doit être sérialisable tel quel
 
 
-def test_url_non_configuree_ne_leve_pas_mais_ne_se_tait_pas(monkeypatch, caplog):
-    """On n'avale JAMAIS une alerte en silence : l'absence d'envoi est journalisée."""
+def test_url_non_configuree_ne_leve_pas_mais_ne_se_tait_pas(monkeypatch):
+    """On n'avale JAMAIS une alerte en silence : l'absence d'envoi est journalisée.
+
+    `caplog` de pytest ne convient pas ici : il patche les handlers de la bibliothèque
+    standard `logging`, or ce dépôt n'appelle nulle part `structlog.configure(...)` pour
+    router structlog vers `logging` -- structlog tourne donc avec sa config par défaut
+    (un PrintLogger qui écrit sur stdout) et `caplog` ne verrait rien passer, que le
+    `log.warning(...)` soit présent ou non. `structlog.testing.capture_logs()` intercepte
+    directement la chaîne de processors de structlog, quelle que soit sa configuration :
+    c'est le seul moyen qui prouve réellement l'émission de l'événement ici.
+    """
     monkeypatch.setattr(webhook.settings, "alert_webhook_url", "")
 
-    envoye = webhook.envoyer("opened", _Alerte(), _Tenant())
+    with structlog.testing.capture_logs() as logs:
+        envoye = webhook.envoyer("opened", _Alerte(), _Tenant())
 
     assert envoye is False          # rien n'a été envoyé, et on le dit
+    assert any(
+        e["event"] == "alerting.webhook_non_configure" and e["log_level"] == "warning"
+        for e in logs
+    ), "l'absence d'envoi doit être journalisée en warning, pas seulement retournée"
 
 
 def test_envoi_reussi(monkeypatch):
@@ -77,3 +93,36 @@ def test_un_webhook_en_panne_leve_pour_que_celery_retente(monkeypatch):
 
     with pytest.raises(webhook.WebhookIndisponible):
         webhook.envoyer("opened", _Alerte(), _Tenant())
+
+
+def test_un_serveur_qui_repond_500_leve_par_le_vrai_chemin(monkeypatch):
+    """Exerce le vrai chemin de production, sans moquer `_post` : un serveur qui répond
+    500 doit produire un `WebhookIndisponible`.
+
+    On monte un vrai `http.server` local plutôt que de simuler `urllib.error.HTTPError`,
+    pour prouver ce qui se passe réellement avec `urllib.request.urlopen` : il lève
+    `HTTPError` (sous-classe d'`OSError`) *avant* de renvoyer un statut >= 400. C'est
+    précisément pourquoi la ligne `if status >= 400` de `envoyer()` est inatteignable en
+    usage réel -- ce test passe par le `except (OSError, urllib.error.URLError)` juste
+    au-dessus, jamais par cette ligne.
+    """
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass  # silence le log par défaut de http.server pendant les tests
+
+    serveur = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=serveur.handle_request)  # une seule requête suffit
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{serveur.server_port}/hook"
+        monkeypatch.setattr(webhook.settings, "alert_webhook_url", url)
+
+        with pytest.raises(webhook.WebhookIndisponible):
+            webhook.envoyer("opened", _Alerte(), _Tenant())
+    finally:
+        thread.join(timeout=5)
+        serveur.server_close()

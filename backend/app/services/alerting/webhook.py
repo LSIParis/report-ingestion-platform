@@ -84,6 +84,12 @@ def envoyer(event: str, alert, tenant) -> bool:
     except (OSError, urllib.error.URLError) as exc:
         raise WebhookIndisponible(str(exc)) from exc
 
+    # Garde de défense en profondeur, normalement inatteignable : en usage réel,
+    # `urlopen` lève déjà `HTTPError` (sous-classe d'`OSError`) pour tout statut >= 400,
+    # et c'est le `except` juste au-dessus qui l'attrape -- on n'arrive jamais ici avec
+    # un vrai `_post`. Cette ligne ne s'exécute qu'avec un `_post` moqué (tests) ou si le
+    # contrat de `_post` change un jour pour renvoyer un statut au lieu de lever. On la
+    # garde pour ce cas-là, pas comme chemin normal de traitement des erreurs HTTP.
     if status >= 400:
         raise WebhookIndisponible(f"HTTP {status}")
 
