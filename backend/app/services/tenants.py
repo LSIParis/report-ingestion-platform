@@ -27,14 +27,26 @@ def dmarc_subject_pattern(domain: str) -> str:
 
 
 def ensure_tenant(db, domain: str, name: str | None = None) -> tuple[Tenant, bool]:
-    """Crée le domaine et sa règle si besoin. Renvoie (tenant, créé).
-    Idempotent : rejouable sans produire de doublon."""
+    """Crée le domaine, sa règle de résolution et sa politique MTA-STS. Renvoie
+    (tenant, créé). Idempotent : rejouable sans produire de doublon."""
     domain = domain.strip().lower()
     tenant = db.execute(select(Tenant).filter_by(domain=domain)).scalar_one_or_none()
     created = tenant is None
 
     if created:
         tenant = Tenant(domain=domain, name=(name or domain).strip())
+        # Politique MTA-STS préremplie depuis le MX RÉEL du domaine. Le `mx:` doit
+        # correspondre au CERTIFICAT du MX, pas à son nom : Microsoft 365 présente
+        # *.mail.protection.outlook.com. S'y tromper, en mode enforce, fait perdre du
+        # courrier — d'où la déduction automatique plutôt qu'une saisie à la main.
+        #
+        # On démarre en `testing` : les expéditeurs SIGNALENT les échecs sans bloquer.
+        # Passer directement en enforce sur un domaine jamais observé, c'est prendre le
+        # risque de couper la réception de courrier d'un client.
+        from app.services.onboarding import mx_policy_for, resolve_mx
+        mx = mx_policy_for(resolve_mx(domain))
+        tenant.mta_sts_mx = mx
+        tenant.mta_sts_mode = "testing" if mx else "none"
         db.add(tenant)
         db.flush()
 

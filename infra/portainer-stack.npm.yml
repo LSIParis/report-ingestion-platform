@@ -114,7 +114,13 @@ services:
     image: ghcr.io/lsiparis/report-api:latest
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-    networks: [internal]
+    # L'API rejoint le réseau du proxy pour servir /.well-known/mta-sts.txt : NPM y
+    # envoie les hôtes mta-sts.<domaine>. Le reste de l'API reste protégé par le
+    # middleware — seule cette route (et /health, /auth/login) est publique.
+    networks:
+      internal:
+      proxy:
+        aliases: [reports-api]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }

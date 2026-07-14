@@ -135,7 +135,7 @@ def _auth_step(key: str, *, domain: str, reporting_domain: str, prefix: str,
 
 
 def build(domain: str, *, mailbox: str, tlsrpt_mailbox: str, reporting_domain: str,
-          mta_sts_ip: str) -> Checklist:
+          mta_sts_ip: str, policy_id: str = "") -> Checklist:
     domain = domain.lower()
     mx = resolve_mx(domain)
     policy_mx = mx_policy_for(mx)
@@ -207,25 +207,35 @@ def build(domain: str, *, mailbox: str, tlsrpt_mailbox: str, reporting_domain: s
             "(nuage orange Cloudflare) casserait la validation du certificat.",
         record={"type": "A", "name": "mta-sts", "value": mta_sts_ip}))
 
-    # 6. La politique elle-même, réellement servie en HTTPS.
+    # 6. La politique, réellement servie en HTTPS. Elle est gérée dans l'application
+    #    (page Domaines) : plus aucun fichier à écrire ni image à reconstruire.
     st, detail = _served_policy(domain)
     cl.steps.append(Step(
         key="mta_sts_policy", zone="plateforme", status=st, detail=detail,
         title="Servir la politique MTA-STS",
-        why=(f"Ajouter infra/mta-sts/policies/{domain}.txt (mode: testing, "
-             f"mx: {', '.join(policy_mx) or '<le MX du domaine>'}), pousser, puis "
-             "redéployer la stack mta-sts. Créer ensuite dans NPM le Proxy Host "
-             f"mta-sts.{domain} → http://mta-sts:80 avec certificat Let's Encrypt, "
-             "SANS « Force SSL » : une redirection invaliderait la récupération.")))
+        why=("La politique est gérée dans l'application. Il reste à créer dans NPM le "
+             f"Proxy Host mta-sts.{domain} → http://reports-api:8000 avec certificat "
+             "Let's Encrypt, SANS « Force SSL » : une redirection sur le chemin de la "
+             "politique invaliderait sa récupération.")))
 
-    # 7. L'annonce DNS de cette politique.
+    # 7. L'annonce DNS, et surtout son `id` : il doit correspondre à la politique
+    #    ACTUELLE. Un id périmé fait garder l'ancienne politique en cache aux
+    #    expéditeurs — jusqu'à expiration de max_age, on ne peut rien y faire.
     sts = next((t for t in _txt(f"_mta-sts.{domain}") if t.startswith("v=STSv1")), None)
+    if not sts:
+        st, detail = "todo", ""
+    elif policy_id and f"id={policy_id}" not in sts.replace(" ", ""):
+        st, detail = "warn", (
+            "l'id publié ne correspond pas à la politique actuelle : les expéditeurs "
+            "gardent l'ancienne en cache tant qu'il n'est pas mis à jour")
+    else:
+        st, detail = "ok", ""
     cl.steps.append(Step(
-        key="mta_sts_txt", zone=domain, found=sts,
-        status="ok" if sts else "todo",
+        key="mta_sts_txt", zone=domain, found=sts, status=st, detail=detail,
         title="Annoncer la politique MTA-STS",
         why="L'id doit CHANGER à chaque modification de la politique, sinon les "
             "expéditeurs gardent l'ancienne en cache jusqu'à expiration de max_age.",
-        record={"type": "TXT", "name": "_mta-sts", "value": "v=STSv1; id=<horodatage>"}))
+        record={"type": "TXT", "name": "_mta-sts",
+                "value": f"v=STSv1; id={policy_id or '<voir la politique>'}"}))
 
     return cl

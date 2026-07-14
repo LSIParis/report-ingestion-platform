@@ -84,6 +84,39 @@ export function useDeleteDomain() {
   });
 }
 
+export interface MtaSts {
+  mode: "none" | "testing" | "enforce";
+  max_age: number;
+  mx: string[];
+  policy_id: string;
+  detected_mx: string[]; // déduit du MX réel : doit correspondre au certificat du MX
+  preview: string;
+}
+
+export const useMtaSts = (id: string | null) =>
+  useQuery({
+    queryKey: ["mta-sts", id],
+    queryFn: () => api<MtaSts>(`/admin/tenants/${id}/mta-sts`),
+    enabled: !!id,
+    gcTime: 0,
+  });
+
+export function useSaveMtaSts(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: { mode: string; max_age: number; mx: string[] }) =>
+      api<MtaSts>(`/admin/tenants/${id}/mta-sts`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(b),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mta-sts", id] });
+      qc.invalidateQueries({ queryKey: ["onboarding", id] });
+    },
+  });
+}
+
 export function useRequeueQuarantine() {
   const qc = useQueryClient();
   return useMutation({

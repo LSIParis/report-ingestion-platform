@@ -27,6 +27,17 @@ class Tenant(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # --- Politique MTA-STS (servie par l'API, plus par une image Docker) ---
+    # none : aucune politique servie. testing : les expéditeurs signalent les échecs sans
+    # bloquer. enforce : ils REFUSENT de livrer si le TLS ne valide pas.
+    mta_sts_mode: Mapped[str] = mapped_column(Text, nullable=False, default="none")
+    mta_sts_max_age: Mapped[int] = mapped_column(Integer, nullable=False, default=86400)
+    # Stocké, jamais recalculé au moment de servir : une panne DNS produirait une
+    # politique fausse, et en `enforce` le courrier cesserait d'être livré.
+    mta_sts_mx: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    mta_sts_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+
 
 class AppUser(Base):
     __tablename__ = "app_user"

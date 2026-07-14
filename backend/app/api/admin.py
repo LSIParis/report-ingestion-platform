@@ -1,11 +1,12 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 
+from app.api import mta_sts
 from app.auth.deps import get_tenant_ctx, require_role
 from app.auth.passwords import hash_password
 from app.config import settings
@@ -143,6 +144,81 @@ def delete_tenant(tenant_id: str, ctx=Depends(get_tenant_ctx)):
           metadata={"domain": domain})
 
 
+class MtaStsIn(BaseModel):
+    mode: str
+    max_age: int = Field(ge=3600, le=31557600)
+    mx: list[str]
+
+
+@router.get("/tenants/{tenant_id}/mta-sts")
+def get_mta_sts(tenant_id: str):
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        return {
+            "mode": t.mta_sts_mode, "max_age": t.mta_sts_max_age, "mx": t.mta_sts_mx,
+            "policy_id": mta_sts.policy_id(t),
+            "detected_mx": onboarding.mx_policy_for(onboarding.resolve_mx(t.domain)),
+            "preview": mta_sts.render(t) if t.mta_sts_mx else "",
+        }
+
+
+@router.put("/tenants/{tenant_id}/mta-sts")
+def set_mta_sts(tenant_id: str, body: MtaStsIn, ctx=Depends(get_tenant_ctx)):
+    """Modifie la politique MTA-STS. C'est ici que passe le durcissement `enforce`.
+
+    Deux garde-fous, parce que c'est le seul réglage de la plateforme qui peut faire
+    PERDRE DU COURRIER :
+
+    - `enforce` sans aucun `mx` est refusé : aucun serveur ne correspondrait, et tous
+      les expéditeurs conformes cesseraient de livrer.
+    - `enforce` est refusé si le `mx` déclaré ne correspond pas au MX réellement publié
+      dans le DNS. C'est l'erreur qui coupe la réception, et elle est silencieuse : rien
+      ne casse chez nous, ce sont les expéditeurs qui renoncent, chacun de leur côté.
+    """
+    if body.mode not in ("none", "testing", "enforce"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "mode invalide")
+
+    mx = [m.strip().lower() for m in body.mx if m.strip()]
+
+    if body.mode == "enforce":
+        if not mx:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Une politique enforce sans mx refuserait TOUT le courrier entrant.")
+        real = onboarding.mx_policy_for(onboarding.resolve_mx(
+            _domain_of(tenant_id)))
+        if real and sorted(mx) != sorted(real):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Le mx déclaré ({', '.join(mx)}) ne correspond pas au MX réel du "
+                f"domaine ({', '.join(real)}). En enforce, les expéditeurs conformes "
+                "cesseraient de livrer le courrier.")
+
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        t.mta_sts_mode, t.mta_sts_max_age, t.mta_sts_mx = body.mode, body.max_age, mx
+        # L'id publié dans le DNS en découle : il change donc mécaniquement à chaque
+        # modification, sans qu'on puisse oublier de l'incrémenter.
+        t.mta_sts_updated_at = datetime.now(timezone.utc)
+        out = {"mode": t.mta_sts_mode, "max_age": t.mta_sts_max_age, "mx": t.mta_sts_mx,
+               "policy_id": mta_sts.policy_id(t)}
+        db.commit()
+
+    audit(actor=ctx.user, action="tenant.mta_sts_updated", target_id=tenant_id,
+          metadata=out)
+    return out
+
+
+def _domain_of(tenant_id: str) -> str:
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        t = db.get(Tenant, tenant_id)
+        return t.domain if t else ""
+
+
 @router.get("/tenants/{tenant_id}/onboarding")
 def tenant_onboarding(tenant_id: str):
     """Procédure de mise en conformité du domaine, VÉRIFIÉE en direct sur le DNS.
@@ -166,6 +242,7 @@ def tenant_onboarding(tenant_id: str):
         if not tenant:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
         domain = tenant.domain
+        pid = mta_sts.policy_id(tenant) if tenant.mta_sts_mx else ""
 
     return onboarding.build(
         domain,
@@ -173,6 +250,7 @@ def tenant_onboarding(tenant_id: str):
         tlsrpt_mailbox=settings.tlsrpt_mailbox or settings.collection_mailbox,
         reporting_domain=settings.reporting_domain,
         mta_sts_ip=settings.mta_sts_ip,
+        policy_id=pid,
     ).as_dict()
 
 

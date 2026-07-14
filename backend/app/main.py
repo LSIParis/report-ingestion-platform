@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import admin, emails, ingest, metrics, reports
+from app.api import admin, emails, ingest, metrics, mta_sts, reports
 from app.auth.login import router as auth_router
 from app.auth.middleware import TenantMiddleware
 
@@ -13,6 +13,7 @@ app.include_router(emails.router)
 app.include_router(metrics.router)
 app.include_router(admin.router)
 app.include_router(ingest.router)     # /ingest/ses — public, sécurisé par signature SNS
+app.include_router(mta_sts.router)    # /.well-known/mta-sts.txt — public (lu par les MTA)
 
 
 @app.get("/health")

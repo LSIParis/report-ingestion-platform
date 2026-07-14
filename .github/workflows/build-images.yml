@@ -7,7 +7,6 @@ on:
     paths:
       - "backend/**"
       - "frontend/**"
-      - "infra/mta-sts/**"
       - ".github/workflows/build-images.yml"
   workflow_dispatch:
 
@@ -35,10 +34,6 @@ jobs:
             dockerfile: ./frontend/Dockerfile.prod
             build_args: |
               VITE_API_URL=/api
-          - image: mta-sts
-            context: ./infra/mta-sts
-            dockerfile: ./infra/mta-sts/Dockerfile
-            build_args: ""
     steps:
       - uses: actions/checkout@v4
 

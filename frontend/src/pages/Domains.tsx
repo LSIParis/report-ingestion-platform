@@ -9,6 +9,7 @@ import {
   useUpdateDomain,
   type Domain,
 } from "../api/domains";
+import { MtaStsPanel } from "../components/MtaStsPanel";
 import { OnboardingPanel } from "../components/OnboardingPanel";
 
 export function Domains() {
@@ -16,6 +17,7 @@ export function Domains() {
   const requeue = useRequeueQuarantine();
   const [creating, setCreating] = useState(false);
   const [procedure, setProcedure] = useState<string | null>(null);
+  const [tls, setTls] = useState<Domain | null>(null);
   const [requeued, setRequeued] = useState<number | null>(null);
 
   async function runRequeue() {
@@ -54,7 +56,12 @@ export function Domains() {
           </thead>
           <tbody>
             {(domains.data ?? []).map((d) => (
-              <Row key={d.id} domain={d} onProcedure={() => setProcedure(d.id)} />
+              <Row
+                key={d.id}
+                domain={d}
+                onProcedure={() => setProcedure(d.id)}
+                onTls={() => setTls(d)}
+              />
             ))}
             {domains.isSuccess && domains.data!.length === 0 && (
               <tr>
@@ -107,11 +114,22 @@ export function Domains() {
       {procedure && (
         <OnboardingPanel tenantId={procedure} onClose={() => setProcedure(null)} />
       )}
+      {tls && (
+        <MtaStsPanel tenantId={tls.id} domain={tls.domain} onClose={() => setTls(null)} />
+      )}
     </div>
   );
 }
 
-function Row({ domain: d, onProcedure }: { domain: Domain; onProcedure: () => void }) {
+function Row({
+  domain: d,
+  onProcedure,
+  onTls,
+}: {
+  domain: Domain;
+  onProcedure: () => void;
+  onTls: () => void;
+}) {
   const update = useUpdateDomain();
   const remove = useDeleteDomain();
   const [confirming, setConfirming] = useState(false);
@@ -163,6 +181,10 @@ function Row({ domain: d, onProcedure }: { domain: Domain; onProcedure: () => vo
         <td className="whitespace-nowrap px-4 py-3 text-right">
           <button onClick={onProcedure} className="text-xs text-gray-900 hover:underline">
             Procédure
+          </button>
+          <span className="mx-2 text-gray-300">·</span>
+          <button onClick={onTls} className="text-xs text-gray-600 hover:underline">
+            Chiffrement
           </button>
           <span className="mx-2 text-gray-300">·</span>
           <button
