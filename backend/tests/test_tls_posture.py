@@ -133,6 +133,63 @@ def test_hors_fenetre_est_ignore(tenant_tls):
     assert p["safe_to_enforce"] is False
 
 
+def test_echec_connu_reste_compte_meme_ligne_incomplete(tenant_tls):
+    """Le cas asymétrique qui comptait le plus : `successful_sessions` illisible ne doit
+    PAS effacer un `failed_sessions` parfaitement lisible. 5 échecs documentés doivent
+    apparaître dans `sessions_failed`, même si l'autre moitié de la ligne est muette."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": None,
+                     "failed_sessions": 5})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["sessions_failed"] == 5            # l'échec connu n'est PAS jeté
+    assert p["incomplete_rows"] == 1
+    assert p["safe_to_enforce"] is False
+
+
+def test_succes_connu_reste_compte_meme_ligne_incomplete(tenant_tls):
+    """Symétrique du précédent : `failed_sessions` illisible ne doit pas effacer un
+    `successful_sessions` lisible."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 100,
+                     "failed_sessions": None})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["sessions_ok"] == 100
+    assert p["incomplete_rows"] == 1
+    assert p["safe_to_enforce"] is False
+
+
+def test_echec_sans_nombre_de_sessions_nest_pas_affiche_comme_zero(tenant_tls):
+    """Une ligne `failure` documente un échec réel ; si `failure_sessions` est illisible,
+    afficher `0 session` mentirait (« échec avéré, 0 session » n'a pas de sens). On
+    affiche `sessions: None` — nombre inconnu, jamais un zéro fabriqué."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 10,
+                     "failed_sessions": 1})
+    _seme(tid, rid, {"kind": "failure",
+                     "result_type": "certificate-expired",
+                     "sending_mta_ip": "203.0.113.9",
+                     "receiving_mx_hostname": "mx.tls-test.example",
+                     "failure_sessions": None})
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["failures"] == [{
+        "result_type": "certificate-expired",
+        "sessions": None,
+        "sending_mta_ip": "203.0.113.9",
+        "receiving_mx_hostname": "mx.tls-test.example",
+    }]
+    # Sans impact sur la décision : le total ne vient jamais des lignes `failure`.
+    assert p["sessions_total"] == 11
+
+
 def test_un_compteur_absent_nest_pas_un_zero(tenant_tls):
     """Le piège central : `failed_sessions` (ou `successful_sessions`) absent ou nul
     n'est PAS un zéro. Un fournisseur peut envoyer un `summary` JSON valide avec

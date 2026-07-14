@@ -27,13 +27,22 @@ Deux pièges, tous deux mortels, tous deux évités ici :
    incomplètes, et `safe_to_enforce` refuse `true` dès qu'il en existe une seule : on ne
    dit « c'est sûr » que si on a réellement tout lu.
 
+ - **Ne pas jeter la moitié connue d'une ligne incomplète.** Un `summary` avec
+   `successful_sessions: null` et `failed_sessions: 5` documente 5 échecs RÉELS ; que
+   l'autre compteur soit illisible n'efface pas ces 5 échecs. Écarter la ligne entière
+   (comme le faisait une version précédente) ferait disparaître un échec avéré de
+   `sessions_failed` — le pire des deux mondes : un sous-comptage silencieux déguisé en
+   prudence, précisément ce que ce module existe pour empêcher. On compte donc chaque
+   moitié lisible indépendamment de l'autre ; `incomplete_rows` continue de signaler la
+   ligne dès qu'un des deux compteurs manque, et `safe_to_enforce` reste bloqué — mais
+   le chiffre affiché à l'écran, lui, ne cache jamais un échec qu'on connaît.
+
 Le service ne connaît pas le tenant : il reçoit une session **déjà scopée**. C'est ce qui
 le rend testable seul et incapable de fuiter — aucun `WHERE tenant_id` applicatif, la RLS
 fait le travail (CLAUDE.md).
 """
 from __future__ import annotations
 
-from collections import Counter
 from datetime import date, timedelta
 
 from app.db.models import ReportRow
@@ -58,7 +67,11 @@ def posture(db, days: int = 30) -> dict:
     # Un échec est identifié par (type, MTA émetteur, MX visé) : c'est ce triplet qui dit
     # à l'exploitant quoi corriger. Deux rapports différents décrivant le même problème
     # doivent s'additionner, pas se dupliquer.
-    detail: Counter[tuple[str, str, str]] = Counter()
+    # Valeur : {"total": somme des `failure_sessions` lisibles, "unknown": au moins une
+    # ligne de ce triplet avait un `failure_sessions` illisible}. Un `Counter` ne peut
+    # pas représenter « nombre inconnu » sans mentir avec un 0 — voir `_int_or_none`
+    # plus bas et le commentaire sur `failures`.
+    detail: dict[tuple[str, str, str], dict] = {}
 
     for r in rows:
         d = r.data
@@ -69,24 +82,45 @@ def posture(db, days: int = 30) -> dict:
             ok = _int_or_none(d.get("successful_sessions"))
             failed = _int_or_none(d.get("failed_sessions"))
             if ok is None or failed is None:
-                # Un des deux totaux est absent ou illisible : cette ligne ne dit rien
-                # de fiable. On ne la compte PAS comme 0 échec (voir le commentaire de
-                # module) — elle rend juste `safe_to_enforce` impossible.
+                # Un des deux totaux est absent ou illisible : la ligne est incomplète,
+                # donc `safe_to_enforce` ne pourra jamais dire « c'est sûr » pour cette
+                # période. Mais jeter la ligne ENTIÈRE serait pire que de la garder à
+                # moitié : si `failed_sessions` est lisible, il décrit un échec RÉEL et
+                # CONNU, indépendamment du fait que `successful_sessions` le soit ou
+                # non — l'écarter le ferait disparaître de `sessions_failed`, soit
+                # exactement le sous-comptage silencieux que ce module doit empêcher.
+                # On compte donc chaque moitié lisible, séparément, et on garde le
+                # signal d'incertitude (voir le commentaire de module).
                 incomplete_rows += 1
-                continue
-            sessions_ok += ok
-            sessions_failed += failed
+            if ok is not None:
+                sessions_ok += ok
+            if failed is not None:
+                sessions_failed += failed
             continue
 
         key = (str(d.get("result_type") or "inconnu"),
                str(d.get("sending_mta_ip") or ""),
                str(d.get("receiving_mx_hostname") or ""))
-        detail[key] += _int(d.get("failure_sessions"))
+        entry = detail.setdefault(key, {"total": 0, "unknown": False})
+        sessions = _int_or_none(d.get("failure_sessions"))
+        if sessions is None:
+            # La ligne `failure` documente un échec RÉEL (elle existe, avec son type,
+            # son MTA, son MX) mais ne dit pas combien de sessions il a touchées.
+            # Le lire comme 0 afficherait « échec avéré, 0 session » à l'écran — un
+            # échec qu'on sait exister deviendrait invisible dans le chiffre, la même
+            # faute que celle corrigée ci-dessus pour les `summary`.
+            # On préfère afficher `sessions: None` (nombre inconnu) plutôt que de
+            # fabriquer un zéro : sans impact sur `safe_to_enforce`, qui ne lit jamais
+            # les lignes `failure` (voir le commentaire de module).
+            entry["unknown"] = True
+        else:
+            entry["total"] += sessions
 
     failures = [
-        {"result_type": rt, "sessions": n,
+        {"result_type": rt, "sessions": None if v["unknown"] else v["total"],
          "sending_mta_ip": ip or None, "receiving_mx_hostname": mx or None}
-        for (rt, ip, mx), n in detail.most_common()
+        for (rt, ip, mx), v in sorted(detail.items(),
+                                       key=lambda kv: kv[1]["total"], reverse=True)
     ]
 
     total = sessions_ok + sessions_failed
@@ -110,17 +144,10 @@ def posture(db, days: int = 30) -> dict:
     }
 
 
-def _int(value) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _int_or_none(value) -> int | None:
-    """Comme `_int`, mais distingue « illisible » de « zéro » : `None` en entrée, ou une
-    valeur non castable, renvoie `None` — jamais 0. Réservé aux compteurs des lignes
-    `summary`, les seules dont un silence peut faire basculer `safe_to_enforce`."""
+    """Distingue « illisible » de « zéro » : `None` en entrée, ou une valeur non
+    castable, renvoie `None` — jamais 0. Utilisé pour tous les compteurs de sessions
+    (`summary` et `failure`) : un silence ne doit jamais devenir un zéro fabriqué."""
     if value is None:
         return None
     try:
