@@ -33,3 +33,36 @@ def test_worker_sees_all_tenants(seed_two_tenants):
     with get_session() as db:  # plan système, BYPASSRLS
         seen = {str(r.tenant_id) for r in db.query(Report).all()}
         assert {tid_a, tid_b} <= seen
+
+
+def test_ip_vue_par_b_est_invisible_de_a(seed_two_tenants):
+    """Le cache ip_intel n'a pas de tenant_id. Ce qui empêche A de sonder l'existence
+    d'une IP chez B, c'est le contrôle d'appartenance de la route : la requête ne trouve
+    la ligne que si elle est visible SOUS RLS.
+
+    Ce test valide la brique sur laquelle ce contrôle repose. S'il tombe, la route peut
+    devenir un oracle : « cette IP est-elle dans votre cache ? » révélerait le trafic
+    d'un autre client.
+    """
+    from app.db.models import ReportRow
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:                       # plan worker : on sème chez B
+        rep_b = db.query(Report).filter_by(tenant_id=tid_b).first()
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id,
+                         data={"source_ip": "198.51.100.42", "message_count": 5}))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:   # A cherche l'IP de B
+            vues = (db.query(ReportRow)
+                      .filter(ReportRow.data["source_ip"].astext == "198.51.100.42")
+                      .all())
+            assert vues == [], "A voit une ligne de B : la route deviendrait un oracle"
+    finally:
+        with get_session() as db:
+            db.query(ReportRow).filter(
+                ReportRow.data["source_ip"].astext == "198.51.100.42").delete(
+                synchronize_session=False)
+            db.commit()
