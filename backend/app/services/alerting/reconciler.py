@@ -15,6 +15,27 @@ Deux propriétés en découlent, toutes deux voulues :
    en rouvre une NEUVE, avec sa propre date. C'est un nouvel événement, il mérite d'être
    dit. (C'est ce que permet le caractère PARTIEL de l'index unique de la migration 0007.)
 
+Un troisième cas mérite le même traitement que le réarmement, et pour la même raison :
+**un changement de sévérité EST un changement de condition**, malgré une `dedup_key`
+identique. Exemple réel : un domaine MTA-STS `testing` lève un `warning` sur un échec TLS
+(les expéditeurs signalent, rien n'est bloqué) ; l'exploitant passe le domaine en
+`enforce` — le MÊME échec devient `critical` (du courrier est désormais REFUSÉ). Si on se
+contentait de laisser l'alerte ouverte en `warning`, l'aggravation ne notifierait
+personne : on tairait précisément la classe de panne que cet outil existe pour combattre.
+
+On ferme donc l'alerte existante et on en ouvre une neuve avec la nouvelle sévérité —
+exactement comme pour une condition qui disparaît puis revient — plutôt que de modifier
+la sévérité en place, pour trois raisons :
+ - fidélité au modèle (« une alerte est un ÉTAT ») : ce sont deux états distincts, chacun
+   avec sa propre date d'ouverture ;
+ - ça NOTIFIE l'aggravation (la tâche qui consomme `ReconcileResult` notifie à l'ouverture
+   et à la fermeture) — modifier en place ne notifierait rien ;
+ - ça préserve l'historique : on peut relire quand l'échec est devenu critique.
+
+Ce traitement est symétrique : une aggravation (`warning` → `critical`) et une
+amélioration (`critical` → `warning`) suivent la même règle, sans cas particulier — la
+sévérité fait partie de la condition, tout simplement.
+
 Aucun filtre `tenant_id` applicatif : la session est déjà scopée par la RLS (CLAUDE.md).
 Voir `base.py` pour le piège que cela implique côté worker.
 """
@@ -43,8 +64,28 @@ def reconcile(db, tenant) -> ReconcileResult:
     res = ReconcileResult()
 
     for cle, cond in courantes.items():
-        if cle in ouvertes:
-            continue                       # déjà ouverte : on ne renotifie pas
+        existante = ouvertes.get(cle)
+        if existante is not None and existante.severity == cond.severity:
+            continue                       # même condition, déjà ouverte : on ne renotifie pas
+
+        if existante is not None:
+            # Sévérité différente malgré la même dedup_key : ce N'EST PAS la même
+            # condition (voir docstring du module). On ferme l'ancienne...
+            existante.closed_at = now
+            res.closed.append(existante)
+            # ...et on force cette fermeture à être VISIBLE en base avant d'insérer la
+            # neuve : l'index unique partiel `ux_alert_ouverte` (migration 0007) interdit
+            # deux alertes OUVERTES sur (tenant_id, kind, dedup_key). L'ordre dans lequel
+            # on ajoute les objets à la session ne détermine PAS l'ordre des requêtes
+            # SQL envoyées par un flush unique — SQLAlchemy regroupe par type
+            # d'opération, et rien ne garantit que l'UPDATE parte avant l'INSERT s'ils
+            # sont flushés ensemble. Un flush() explicite ici, isolé, garantit que
+            # l'UPDATE de fermeture part AVANT que l'INSERT de la neuve n'existe même
+            # dans la session : deux flush() séparés s'exécutent dans l'ordre du
+            # programme, sans ambiguïté possible. Prouvé par
+            # test_changement_de_severite_ne_viole_pas_lindex_partiel.
+            db.flush()
+
         alerte = Alert(tenant_id=tenant.id, kind=cond.kind, dedup_key=cond.dedup_key,
                        severity=cond.severity, payload=cond.payload, opened_at=now)
         db.add(alerte)

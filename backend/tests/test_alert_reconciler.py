@@ -139,3 +139,92 @@ def test_la_severite_est_enregistree(domaine, conditions):
     assert a.severity == "critical"
     assert a.payload == {"x": 1}
     assert a.opened_at is not None and a.closed_at is None
+
+
+def test_aggravation_warning_vers_critical_ferme_et_rouvre(domaine, conditions):
+    """Le cas réel qui motive ce correctif : un domaine MTA-STS `testing` lève un
+    `warning` sur un échec TLS ; l'exploitant passe en `enforce` et le MÊME échec
+    devient `critical` (du courrier est désormais refusé). Une même `dedup_key` mais
+    une sévérité différente n'est PAS la même condition : il faut fermer l'ancienne
+    alerte et en ouvrir une neuve, sinon l'aggravation ne notifie personne."""
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1",
+                                severity="warning", payload={"a": 1}))
+    _reconcilier(domaine)
+
+    conditions.clear()
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1",
+                                severity="critical", payload={"a": 1}))
+    opened, closed = _reconcilier(domaine)
+
+    assert opened == ["tls_failure"] and closed == ["tls_failure"]
+
+    with tenant_scoped_session(tenant_id=domaine) as db:
+        toutes = db.query(Alert).filter_by(kind="tls_failure", dedup_key="k1").all()
+        assert len(toutes) == 2                                    # historique préservé
+
+        fermee = [a for a in toutes if a.closed_at is not None]
+        ouverte = [a for a in toutes if a.closed_at is None]
+        assert len(fermee) == 1 and len(ouverte) == 1
+        assert fermee[0].severity == "warning"
+        assert ouverte[0].severity == "critical"
+
+
+def test_amelioration_critical_vers_warning_ferme_et_rouvre(domaine, conditions):
+    """Le sens inverse : pas de cas particulier, la sévérité fait partie de la
+    condition dans les deux sens."""
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1",
+                                severity="critical", payload={"a": 1}))
+    _reconcilier(domaine)
+
+    conditions.clear()
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1",
+                                severity="warning", payload={"a": 1}))
+    opened, closed = _reconcilier(domaine)
+
+    assert opened == ["tls_failure"] and closed == ["tls_failure"]
+
+    with tenant_scoped_session(tenant_id=domaine) as db:
+        toutes = db.query(Alert).filter_by(kind="tls_failure", dedup_key="k1").all()
+        assert len(toutes) == 2
+
+        fermee = [a for a in toutes if a.closed_at is not None]
+        ouverte = [a for a in toutes if a.closed_at is None]
+        assert len(fermee) == 1 and len(ouverte) == 1
+        assert fermee[0].severity == "critical"
+        assert ouverte[0].severity == "warning"
+
+
+def test_changement_de_severite_ne_viole_pas_lindex_partiel(domaine, conditions):
+    """Preuve, pas supposition : l'index unique partiel `ux_alert_ouverte` interdit deux
+    alertes OUVERTES sur le même (tenant_id, kind, dedup_key). Si le réconciliateur
+    insérait la neuve avant que la fermeture de l'ancienne soit visible en base, ce test
+    lèverait une IntegrityError au flush plutôt que de passer."""
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1", severity="warning"))
+    _reconcilier(domaine)
+
+    conditions.clear()
+    conditions.append(Condition(kind="tls_failure", dedup_key="k1", severity="critical"))
+    _reconcilier(domaine)              # ne doit PAS lever IntegrityError
+
+    with tenant_scoped_session(tenant_id=domaine) as db:
+        ouvertes = (db.query(Alert)
+                      .filter_by(kind="tls_failure", dedup_key="k1")
+                      .filter(Alert.closed_at.is_(None)).all())
+        assert len(ouvertes) == 1                # l'index a bien pu être respecté
+        assert ouvertes[0].severity == "critical"
+
+
+def test_condition_inchangee_ne_rouvre_toujours_rien_non_regression(domaine, conditions):
+    """Non-régression explicite : le nouveau traitement de la sévérité ne doit rien
+    changer au cas nominal. Une condition strictement inchangée (même sévérité) ne
+    rouvre rien, et l'idempotence tient sur N passages."""
+    cond = Condition(kind="tls_failure", dedup_key="k1", severity="warning", payload={"a": 1})
+    conditions.append(cond)
+
+    for _ in range(4):
+        opened, closed = _reconcilier(domaine)
+
+    assert opened == [] and closed == []         # après le premier passage : rien
+    with tenant_scoped_session(tenant_id=domaine) as db:
+        assert db.query(Alert).count() == 1
+        assert len(_ouvertes(domaine)) == 1
