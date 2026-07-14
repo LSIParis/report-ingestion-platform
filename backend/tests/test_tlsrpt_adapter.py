@@ -107,6 +107,23 @@ def test_json_malforme():
     assert r.errors[0]["code"] == "TLSRPT_BAD_JSON"
 
 
+def test_rapport_sans_aucune_politique_est_distingue_du_cas_sans_domaine():
+    """`policies: []` n'est PAS le même défaut que « une politique sans policy-domain »
+    (couvert par `test_sans_policy_domain_on_refuse_plutot_que_deviner` ci-dessous) : ici
+    il n'y a AUCUNE politique à examiner, la boucle ne tourne même pas. Le statut refusé
+    (`failed`, aucune ligne) est le même refus par défaut dans les deux cas — c'est le
+    bon comportement, conforme à l'invariant « on ne devine jamais le tenant ». Mais le
+    code et le message doivent le dire correctement : un exploitant qui lit
+    « aucun policy-domain exploitable » sur un rapport sans AUCUNE politique cherchera un
+    champ manquant qui n'existe pas."""
+    r = _parse(_rapport(policies=[]))
+
+    assert r.status == "failed"
+    assert r.errors[0]["code"] == "TLSRPT_NO_POLICY"
+    assert "aucune politique" in r.errors[0]["message"]
+    assert r.rows == []
+
+
 def test_sans_policy_domain_on_refuse_plutot_que_deviner():
     r = _parse(json.dumps({
         "organization-name": "X", "report-id": "y",

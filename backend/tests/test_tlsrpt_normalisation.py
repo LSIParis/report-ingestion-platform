@@ -92,12 +92,24 @@ def test_ligne_failure_normalisee():
 
 
 def test_report_date_caste_en_date_iso():
-    """C'est exactement le bug silencieux qu'aurait produit un mapping cassé :
-    `report_date` resterait à `None` sans faire échouer la ligne (le champ n'est
-    'que' TYPE_CAST-invalide s'il est absent, jamais MISSING_FIELD sur une valeur
-    déjà bien formée). On vérifie donc la valeur réelle, pas seulement sa présence."""
+    """`report_date` est `required: true` dans le profil et vient de l'en-tête, commun
+    à toutes les lignes. Un mapping cassé (source absente) tombe dans la branche
+    `if raw_val in (None, "")` de `_normalize_row` : avec `required`, ça produit une
+    erreur `MISSING_FIELD` de sévérité `error` — jamais `TYPE_CAST`, qui suppose une
+    valeur présente mais mal formée. `NormalizationService.normalize()` exclut alors
+    la ligne ENTIÈRE de `out_rows` (une erreur `severity == 'error'` sur la ligne
+    suffit, voir normalizer.py). Donc une régression sur ce mapping ne laisserait pas
+    `report_date` à `None` sur des lignes présentes : elle viderait `r.rows`.
+
+    D'où l'assertion de non-vacuité ci-dessous : sans elle, la boucle qui suit ne
+    s'exécuterait jamais sur un `r.rows` vide et le test passerait quand même — alors
+    que c'est exactement le scénario contre lequel il est censé protéger."""
     r = _normalized(_rapport())
 
+    assert r.rows, (
+        "r.rows est vide : la boucle ci-dessous ne prouverait rien "
+        "(vrai vacueusement) et masquerait une régression MISSING_FIELD sur report_date"
+    )
     for row in r.rows:
         assert row["report_date"] == "2026-07-13"
         assert row["period_end"] == "2026-07-13"

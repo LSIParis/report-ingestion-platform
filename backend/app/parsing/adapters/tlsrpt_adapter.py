@@ -72,6 +72,18 @@ class TlsRptAdapter(ReportAdapter):
         }
 
         policies = doc.get("policies") or []
+
+        if not policies:
+            # Distinct du cas "policy-domain absent" ci-dessous : ici il n'y a même pas
+            # de politique à examiner (liste vide). Même refus par défaut (invariant §6 :
+            # on ne devine jamais le tenant), mais un diagnostic différent — sinon
+            # l'exploitant cherche un champ manquant qui n'existe pas.
+            return ParseResult(
+                status="failed",
+                errors=[{"code": "TLSRPT_NO_POLICY", "severity": "fatal",
+                          "message": "rapport sans aucune politique"}],
+                metadata=header)
+
         rows: list[dict] = []
         errors: list[dict] = []
         policy_domain: str | None = None
@@ -85,9 +97,11 @@ class TlsRptAdapter(ReportAdapter):
                                "message": str(exc), "severity": "error"})
 
         if not policy_domain:
-            # Sans domaine de politique, impossible de vérifier à quel tenant ce rapport
-            # appartient → on refuse plutôt que de deviner (invariant §6). C'est ce champ
-            # que `guard_report_domain` recoupe avec le tenant résolu depuis le sujet.
+            # Il y avait au moins une politique, mais aucune n'a fourni de policy-domain
+            # exploitable (champ absent ou toutes corrompues). Impossible de vérifier à
+            # quel tenant ce rapport appartient → on refuse plutôt que de deviner
+            # (invariant §6). C'est ce champ que `guard_report_domain` recoupe avec le
+            # tenant résolu depuis le sujet.
             return ParseResult(
                 status="failed",
                 errors=[*errors, {"code": "TLSRPT_NO_POLICY_DOMAIN", "severity": "fatal",
