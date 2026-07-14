@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.api.admin import router as admin_router
 from app.auth.middleware import TenantContext
-from app.db.models import Email, Report, ReportRow, Tenant
+from app.db.models import Email, ParsingError, Report, ReportRow, Tenant
 from app.db.session import get_session, tenant_scoped_session
 from app.services.tls_posture import posture
 
@@ -49,7 +49,15 @@ def tenant_tls():
     # supplémentaire pour simuler un second fournisseur (voir `_nouveau_rapport`), le
     # nettoyage doit donc emporter TOUT ce qui appartient à ce tenant, pas seulement
     # ce que la fixture a elle-même créé.
+    #
+    # ParsingError AVANT Report : un test (garde anti-usurpation) sème une
+    # ParsingError qui référence un report_id par FK sans ON DELETE CASCADE
+    # (migration 0001). Supprimer Report avant ParsingError lève une violation de
+    # clé étrangère qui interrompt tout ce bloc — Tenant n'est alors JAMAIS supprimé,
+    # et le test suivant échoue à la création (contrainte UNIQUE sur `domain`) avec
+    # une erreur qui ne pointe vers rien de ce qu'on vient de changer.
     with get_session() as db:
+        db.query(ParsingError).filter_by(tenant_id=ids[0]).delete()
         db.query(ReportRow).filter_by(tenant_id=ids[0]).delete()
         db.query(Report).filter_by(tenant_id=ids[0]).delete()
         db.query(Email).filter_by(tenant_id=ids[0]).delete()
@@ -196,6 +204,115 @@ def test_rapport_illisible_bloque_safe_to_enforce_et_est_compte(tenant_tls):
     assert p["reports_unreadable"] == 1
     assert p["safe_to_enforce"] is False, (
         "feu vert alors qu'un rapport TLS entier n'a pas pu etre lu")
+
+
+def test_piece_jointe_illisible_est_comptee_comme_rapport_illisible(tenant_tls):
+    """`_record_unreadable` (`workers/tasks.py`) cree un `Report(status="failed")` SANS
+    `profile_id` -- justement parce qu'on n'a pas su determiner la nature du fichier
+    (ex. un `google.com!exemple.fr!....json.gz` tronque, ou un zip au CRC casse :
+    `decompress()` leve, `detect_format` renvoie `None`, `looks_like_report` est vrai).
+    Un rapport DMARC ou TLS lisible mais en echec porte TOUJOURS un `profile_id` ; seule
+    une piece jointe dont on n'a jamais etabli la nature a `profile_id` NULL. Sans ce
+    garde, une telle piece jointe disparaissait de `reports_unreadable` et le feu vert
+    revenait a tort."""
+    tid, rid = tenant_tls
+    # Un rapport propre, 0 echec : le piege ne doit pas etre visible autrement que par
+    # le nouveau garde.
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-pj-illisible-{uuid.uuid4()}",
+                   from_address="noreply@fournisseur-c.example", subject="s",
+                   received_at=datetime.now(timezone.utc),
+                   raw_object_key="raw/z.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        # Comme `_record_parsing_failure` : profile_id NULL, on n'a jamais su ce que
+        # c'etait (rapport DMARC ? TLS ? ni l'un ni l'autre ?).
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id=None)
+        db.add(rep)
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 1
+    assert p["safe_to_enforce"] is False, (
+        "feu vert alors qu'une piece jointe illisible n'a jamais ete identifiee")
+
+
+def test_profil_tls_specifique_au_tenant_est_reconnu(tenant_tls):
+    """`select_profile()` (voir `app.normalization.profiles`) sert un profil
+    `{domaine}_tlsrpt_json` en priorite s'il existe -- ajouter un tel profil est une
+    operation de DONNEE, sans code ni deploiement (CLAUDE.md). Une egalite stricte sur
+    `_default_tlsrpt_json` ne reconnaitrait pas un tel rapport : il retomberait
+    silencieusement hors de `reports_unreadable`, le faux feu vert reviendrait, et
+    aucun test ne tomberait. `reports_unreadable` doit reconnaitre un rapport TLS par
+    MOTIF (suffixe `tlsrpt_json`), pas par egalite stricte."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-profil-specifique-{uuid.uuid4()}",
+                   from_address="noreply@fournisseur-d.example", subject="s",
+                   received_at=datetime.now(timezone.utc),
+                   raw_object_key="raw/w.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        # Simule un profil specifique au tenant : `tls-test_tlsrpt_json` (au lieu du
+        # profil partage `_default_tlsrpt_json`), comme le produirait `select_profile()`
+        # si `profiles/tls-test_tlsrpt_json.json` existait.
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id="tls-test_tlsrpt_json")
+        db.add(rep)
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 1
+    assert p["safe_to_enforce"] is False, (
+        "un profil TLS specifique au tenant n'est pas reconnu par l'egalite stricte")
+
+
+def test_rapport_rejete_par_le_garde_anti_usurpation_ne_bloque_pas_le_feu_vert(tenant_tls):
+    """La boite de collecte est OUVERTE : n'importe qui peut forger un faux rapport TLS
+    au sujet du domaine d'un client pour lui faire perdre son feu vert -- c'est
+    precisement pourquoi `guard_report_domain` existe (`app.parsing.guards`). Un
+    rapport parfaitement LISIBLE, mais qui concerne un AUTRE domaine, est rejete par ce
+    garde avec `status="failed"` et le `profile_id` TLS habituel : ce n'est PAS un
+    rapport illisible, c'est un rapport qui n'etait pas pour nous et qu'on a
+    correctement ecarte. Le garde protege les donnees ; il ne doit pas devenir un
+    levier de nuisance sur la decision `enforce`."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-usurpe-{uuid.uuid4()}",
+                   from_address="attaquant@ailleurs.example", subject="s",
+                   received_at=datetime.now(timezone.utc),
+                   raw_object_key="raw/v.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id="_default_tlsrpt_json")
+        db.add(rep)
+        db.flush()
+        db.add(ParsingError(tenant_id=tid, email_id=em.id, report_id=rep.id,
+                            severity="fatal", code="DMARC_DOMAIN_MISMATCH",
+                            message="rapport concernant un autre domaine, rejete"))
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 0, (
+        "un rapport force pour un autre domaine ne doit pas bloquer le feu vert")
+    assert p["safe_to_enforce"] is True
 
 
 def test_rapport_illisible_hors_fenetre_nest_pas_compte(tenant_tls):

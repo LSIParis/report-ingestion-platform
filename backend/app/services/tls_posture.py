@@ -58,6 +58,23 @@ Deux pièges, tous deux mortels, tous deux évités ici :
    `report_row` : c'est le seul endroit qui sait qu'un rapport est arrivé même quand
    son contenu n'a jamais atteint la table qu'interroge le reste de cette fonction.
 
+ - Ne pas oublier la pièce jointe dont on n'a jamais su la NATURE. `_record_unreadable`
+   (`app.workers.tasks`) crée un `Report(status="failed")` avec `profile_id` NULL --
+   précisément parce qu'on n'a pas pu établir si c'était un rapport DMARC, un rapport
+   TLS, ou autre chose (archive `.gz`/`.zip` tronquée, CRC cassé...). Un rapport
+   DMARC ou TLS LISIBLE mais en échec porte, lui, toujours un `profile_id` : compter
+   aussi les rapports `profile_id IS NULL` ne produit donc pas de rouge parasite. On
+   assume que cela élargit la portée du panneau TLS à des pièces jointes qui
+   n'étaient peut-être même pas du TLS -- c'est voulu : le silence d'une pièce
+   jointe qu'on n'a jamais su identifier n'est jamais un « rien à signaler ».
+
+ - Ne pas laisser le garde anti-usurpation (`guard_report_domain`, DMARC_DOMAIN_MISMATCH)
+   devenir un levier de nuisance. La boîte de collecte est OUVERTE : n'importe qui
+   peut forger un rapport au sujet du domaine d'un client. Un rapport que ce garde
+   rejette est correctement écarté, PAS illisible -- le compter dans
+   `reports_unreadable` permettrait à un unique e-mail forgé de priver un tenant de
+   son feu vert pendant toute la fenêtre. On l'exclut donc explicitement.
+
 Le service ne connaît pas le tenant : il reçoit une session **déjà scopée**. C'est ce qui
 le rend testable seul et incapable de fuiter — aucun `WHERE tenant_id` applicatif, la RLS
 fait le travail (CLAUDE.md).
@@ -66,23 +83,40 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from app.db.models import Report, ReportRow
+from sqlalchemy import or_
+
+from app.db.models import ParsingError, Report, ReportRow
 from app.services.counters import int_or_none as _int_or_none
 
 _kind = ReportRow.data["kind"].astext
 _report_date = ReportRow.data["report_date"].astext
 
-# Le profil TLS est TOUJOURS `_default_tlsrpt_json` : `select_profile()` (voir
-# `app.normalization.profiles`) ne sert un profil `{domaine}_tlsrpt_json` que si un
-# fichier spécifique existe pour ce tenant, ce qui n'est le cas d'aucun tenant du
-# dépôt aujourd'hui -- le format TLS-RPT est normalisé (RFC 8460), il n'y a donc
-# aucune raison de dupliquer un mapping par domaine, contrairement aux profils
-# `{marque}_csv`/`{marque}_xlsx` propres à chaque expéditeur. C'est ce nom de
-# fichier, posé sur `Report.profile_id` par `PersistenceService.persist` (voir
-# `app.workers.tasks._process_source`), qui permet de reconnaître un rapport TLS
-# SANS dépendre du contenu de `report_row` -- justement ce qui manque quand ce
-# contenu n'existe pas.
-_TLS_PROFILE_ID = "_default_tlsrpt_json"
+# Reconnaître un rapport TLS par MOTIF (`LIKE '%tlsrpt_json'`), pas par égalité
+# stricte sur `_default_tlsrpt_json`. `select_profile()` (voir
+# `app.normalization.profiles`) sert un profil `{domaine}_tlsrpt_json` en PRIORITÉ
+# quand un fichier `profiles/{domaine}_tlsrpt_json.json` existe pour ce tenant, et
+# n'utilise `_default_tlsrpt_json` qu'en repli. Ajouter un tel profil spécifique est
+# une opération de DONNÉE, sans code ni déploiement (CLAUDE.md) : le jour où
+# quelqu'un dépose ce fichier pour un tenant, une égalité stricte cesserait de
+# reconnaître ses rapports TLS, `reports_unreadable` retomberait silencieusement à
+# 0 pour ce tenant, le faux feu vert reviendrait, et AUCUN test ne le verrait. Le
+# suffixe `tlsrpt_json` est commun aux deux formes du nom de profil ; il est fixé
+# par `@register("tlsrpt_json")` dans l'adaptateur (voir
+# `app.parsing.adapters.tlsrpt_adapter`), pas par convention arbitraire ici.
+_TLS_PROFILE_PATTERN = "%tlsrpt_json"
+
+# Code posé par `guard_report_domain` (`app.parsing.guards`) quand un rapport
+# parfaitement LISIBLE ne concerne pas le tenant qui l'a reçu. La boîte de collecte
+# est OUVERTE : n'importe qui peut forger un rapport TLS au sujet du domaine d'un
+# client pour lui faire perdre son feu vert -- c'est précisément pourquoi ce garde
+# existe. Un rapport qu'il rejette n'est PAS un rapport illisible : c'est un
+# rapport qui n'était pas pour nous, et qu'on a correctement écarté. Le compter
+# dans `reports_unreadable` transformerait un garde anti-usurpation des DONNÉES en
+# un levier de nuisance sur la DÉCISION enforce : un e-mail forgé suffirait à
+# priver un tenant de son feu vert pendant toute la fenêtre. On l'exclut donc par
+# son code d'erreur -- le même code sert pour DMARC et TLS-RPT, `guard_report_domain`
+# ne distinguant pas les deux formats (les deux déclarent `policy_domain`).
+_DOMAIN_MISMATCH_CODE = "DMARC_DOMAIN_MISMATCH"
 
 
 def posture(db, days: int = 30) -> dict:
@@ -103,6 +137,24 @@ def posture(db, days: int = 30) -> dict:
     # `Report.status` directement -- la seule table qui sait qu'un rapport est arrivé
     # même quand son contenu n'a jamais atteint `report_row`.
     #
+    # Deuxième source, distincte de la première : `_record_parsing_failure`
+    # (`app.workers.tasks`, appelée par `_record_unreadable`) crée un `Report` avec
+    # `profile_id` NULL -- précisément parce qu'une pièce jointe (archive `.gz`/`.zip`
+    # tronquée, CRC cassé...) n'a jamais pu être identifiée comme DMARC ou TLS avant
+    # d'échouer. Un rapport DMARC ou TLS LISIBLE mais en échec porte, lui, TOUJOURS un
+    # `profile_id` (posé avant le parsing par `select_profile()`) : il n'y a donc pas
+    # de rouge parasite de ce côté. On assume et on le dit : une pièce jointe DMARC
+    # illisible fait aussi passer ce panneau TLS au rouge -- c'est le sens du principe
+    # du module, on ne prétend jamais savoir ce qu'on ignore. C'est pour ça que le
+    # texte affiché à l'écran (`MtaStsPanel.tsx`) parle d'« une pièce jointe qui
+    # prétendait être un rapport », jamais d'« un rapport TLS ».
+    #
+    # Dans les deux cas, on exclut les rapports rejetés par le garde anti-usurpation
+    # (`_DOMAIN_MISMATCH_CODE`) : ce ne sont pas des rapports illisibles, ce sont des
+    # rapports qui n'étaient pas pour nous (voir le commentaire sur cette constante).
+    # Sans exclusion, un simple e-mail forgé au sujet du domaine d'un client
+    # suffirait à lui retirer son feu vert pendant toute la fenêtre.
+    #
     # Fenêtre de temps : `Report.created_at` (date de RÉCEPTION/traitement chez nous),
     # PAS `report_date` (date du rapport côté fournisseur, un champ de `ReportRow.data`
     # qui n'existe tout simplement pas ici puisqu'aucune ligne n'a été persistée). Les
@@ -111,11 +163,19 @@ def posture(db, days: int = 30) -> dict:
     # nous ne savions pas ?" -- c'est cette seconde question que ce garde pose, la
     # première n'a pas de réponse pour un rapport qui n'a jamais été normalisé.
     cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    _rejete_pour_usurpation = (
+        db.query(ParsingError.id)
+          .filter(ParsingError.report_id == Report.id)
+          .filter(ParsingError.code == _DOMAIN_MISMATCH_CODE)
+          .exists()
+    )
     reports_unreadable = (
         db.query(Report)
-          .filter(Report.profile_id == _TLS_PROFILE_ID)
+          .filter(or_(Report.profile_id.like(_TLS_PROFILE_PATTERN),
+                      Report.profile_id.is_(None)))
           .filter(Report.status != "ok")
           .filter(Report.created_at >= cutoff_dt)
+          .filter(~_rejete_pour_usurpation)
           .count()
     )
 
@@ -217,13 +277,15 @@ def posture(db, days: int = 30) -> dict:
         # absent ou non entier). Exposé tel quel : c'est à l'appelant (l'écran enforce)
         # de savoir qu'il existe des lignes muettes, pas seulement des échecs à zéro.
         "incomplete_rows": incomplete_rows,
-        # Nombre de RAPPORTS TLS (pas de lignes) dont on n'a jamais pu lire le contenu
-        # -- `Report.status != "ok"` sur le profil TLS, dans la fenêtre. Distinct
-        # d'`incomplete_rows` : celui-ci compte des lignes `summary` PARTIELLEMENT
-        # lisibles (un compteur sur deux) ; celui-là compte des rapports qui n'ont
-        # JAMAIS laissé une seule ligne à lire. « Je n'ai pas su te lire » ne doit
-        # jamais se lire « rien à signaler » -- d'où un compteur séparé plutôt qu'un
-        # 0 silencieux fondu dans les autres champs.
+        # Nombre de RAPPORTS (pas de lignes) dont on n'a jamais pu lire le contenu --
+        # `Report.status != "ok"` sur le profil TLS (par MOTIF, voir
+        # `_TLS_PROFILE_PATTERN`) OU sur une pièce jointe jamais identifiée
+        # (`profile_id IS NULL`, voir plus haut), à l'exclusion des rejets du garde
+        # anti-usurpation, dans la fenêtre. Distinct d'`incomplete_rows` : celui-ci
+        # compte des lignes `summary` PARTIELLEMENT lisibles (un compteur sur deux) ;
+        # celui-là compte des rapports qui n'ont JAMAIS laissé une seule ligne à lire.
+        # « Je n'ai pas su te lire » ne doit jamais se lire « rien à signaler » -- d'où
+        # un compteur séparé plutôt qu'un 0 silencieux fondu dans les autres champs.
         "reports_unreadable": reports_unreadable,
         # Des données, aucun échec, ET rien d'illisible -- ni au niveau de la ligne
         # (compteur absent, `incomplete_rows`), ni au niveau du RAPPORT ENTIER

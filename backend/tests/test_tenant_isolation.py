@@ -101,6 +101,18 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
             "sending_mta_ip": "203.0.113.44",
             "receiving_mx_hostname": "mx.tenant-b-test.com",
             "failure_sessions": 3}))
+        # Un rapport TLS de B, entier, jamais lu (`reports_unreadable` -- voir
+        # `tls_posture.py`). Il ne laisse AUCUNE ReportRow, donc les deux assertions
+        # ci-dessus ne peuvent pas le voir : sans cette troisieme ligne de semis,
+        # une regression future qui ferait fuiter `reports_unreadable` de B vers A
+        # (ex. un `bypass=True` ajoute par erreur) ne serait detectee par aucun test
+        # bloquant.
+        rep_b_illisible = Report(tenant_id=tid_b, email_id=rep_b.email_id,
+                                 source_type="attachment", status="failed",
+                                 profile_id="_default_tlsrpt_json")
+        db.add(rep_b_illisible)
+        db.flush()
+        rep_b_illisible_id = str(rep_b_illisible.id)
         db.commit()
 
     try:
@@ -108,10 +120,13 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
             p = posture(db, days=30)
             assert p["sessions_total"] == 0, "A voit des sessions TLS de B"
             assert p["failures"] == [], "A voit les echecs detailles de B"
+            assert p["reports_unreadable"] == 0, "A voit un rapport TLS illisible de B"
     finally:
         with get_session() as db:
             db.query(ReportRow).filter(
                 ReportRow.data["policy_domain"].astext == "tenant-b-test.com").delete(
+                synchronize_session=False)
+            db.query(Report).filter_by(id=rep_b_illisible_id).delete(
                 synchronize_session=False)
             db.commit()
 

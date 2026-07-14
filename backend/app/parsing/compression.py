@@ -18,6 +18,11 @@ import zipfile
 MAX_BYTES = 64 * 1024 * 1024
 _CHUNK = 1 << 20
 
+# Borne la LONGUEUR du message d'erreur "archive sans .xml/.json" (voir plus bas), pas
+# seulement le nombre de noms listés : un nom d'entrée zip peut à lui seul faire
+# 65 535 octets (limite du champ de longueur du format).
+MAX_APERCU_CHARS = 200
+
 
 class DecompressionTooLarge(ValueError):
     """L'archive dépasse la taille décompressée autorisée (bombe probable)."""
@@ -76,12 +81,27 @@ def _decompress(raw: bytes) -> bytes:
             if not names:
                 # `entries` vient d'une archive HOSTILE, pas d'un contenu qu'on
                 # contrôle : une archive à 50 000 entrées produirait un message de
-                # plusieurs méga-octets, ensuite persisté tel quel dans
-                # `parsing_error.message`. On borne aux 10 premiers noms, avec un
-                # "..." qui dit qu'il y en a d'autres plutôt que de laisser croire
-                # que l'archive n'en contenait que 10.
+                # plusieurs méga-octets si on les listait toutes. Défense en
+                # profondeur, pas une garantie sur ce que devient ce message
+                # aujourd'hui : `detect_format` avale ce `ValueError` (il renvoie
+                # `None`), et c'est `_record_unreadable` qui persiste son PROPRE
+                # message dans `parsing_error.message` -- ce texte-ci n'y atterrit
+                # donc pas tel quel en pratique. Mais le contrat de `decompress()`
+                # (voir plus haut) est de rester utilisable par N'IMPORTE quel
+                # appelant, aujourd'hui ou demain ; borner ce qu'on construit ici
+                # reste la bonne discipline même si l'appelant actuel jette le
+                # résultat. On borne donc à la fois le NOMBRE de noms (10, avec un
+                # "..." qui dit qu'il y en a d'autres) et leur LONGUEUR totale
+                # (`MAX_APERCU_CHARS`) : un seul nom d'entrée zip peut à lui seul
+                # faire 65 535 octets (limite du format), donc borner uniquement
+                # le nombre ne suffit pas -- dix noms de cette taille produiraient
+                # quand même un message de ~640 Ko.
                 apercu = ", ".join(entries[:10])
-                if len(entries) > 10:
+                tronque = len(entries) > 10
+                if len(apercu) > MAX_APERCU_CHARS:
+                    apercu = apercu[:MAX_APERCU_CHARS]
+                    tronque = True
+                if tronque:
                     apercu += ", ..."
                 raise ValueError(
                     f"archive zip sans fichier .xml ou .json (contenu : {apercu})")

@@ -77,6 +77,25 @@ def test_message_zip_sans_xml_ni_json_est_borne():
     assert len(message) < 1000
 
 
+def test_message_zip_sans_xml_ni_json_est_borne_en_longueur_aussi():
+    # Un nom d'entree zip peut faire jusqu'a 65535 octets (limite du champ de longueur
+    # du format). Dix noms de cette taille produiraient un message de ~640 Ko : la
+    # borne sur le NOMBRE de noms (10) ne suffit pas, il faut aussi borner la LONGUEUR
+    # totale du message.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for i in range(10):
+            # 65535 octets pile : la limite du champ de longueur de nom du format zip.
+            suffixe = f"{i}.txt"
+            nom_enorme = ("x" * (65535 - len(suffixe))) + suffixe
+            z.writestr(nom_enorme, "x")
+    with pytest.raises(ValueError) as exc_info:
+        decompress(buf.getvalue())
+    message = str(exc_info.value)
+    assert len(message) < 500
+    assert "..." in message
+
+
 def test_bombe_gzip_est_bornee():
     # 200 Mo de zéros compressent en quelques Ko. Sans borne, on les décompresse tous.
     bombe = gzip.compress(b"\0" * (200 * 1024 * 1024))

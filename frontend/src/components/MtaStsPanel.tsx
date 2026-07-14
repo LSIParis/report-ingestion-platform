@@ -365,7 +365,9 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
             {p.days} jours n'{p.reports_unreadable > 1 ? "ont" : "a"} pas pu être{" "}
             {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement.
           </strong>{" "}
-          Son contenu — échecs éventuels compris — n'a jamais atteint les chiffres
+          {p.reports_unreadable > 1 ? "Leurs" : "Son"} contenu
+          {plural(p.reports_unreadable)} — échecs éventuels compris — n'
+          {p.reports_unreadable > 1 ? "ont" : "a"} jamais atteint les chiffres
           ci-dessus : on ne sait donc pas tout, et le passage en mode appliqué ne peut
           pas être garanti sûr.
         </>
@@ -388,16 +390,28 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
           ici — on ne peut pas garantir l'exhaustivité.
         </p>
       )}
-      {p.reports_unreadable > 0 && (
+      {/* Ce paragraphe ne s'affiche QUE si `reports_unreadable` n'est pas déjà le
+          signal principal ci-dessus (branche `p.reports_unreadable > 0` du if/else) :
+          dans ce cas, le titre a DÉJÀ donné le nombre et l'explication, et répéter le
+          même paragraphe ici ferait lire deux fois la même chose à l'exploitant. Ce
+          bloc n'apporte une information NOUVELLE que lorsque reports_unreadable
+          coexiste avec un autre signal principal (échecs, incomplétude, détail) --
+          d'où la condition supplémentaire sur ces trois champs. */}
+      {p.reports_unreadable > 0 &&
+        (p.sessions_failed > 0 || p.incomplete_rows > 0 || p.failures.length > 0) && (
         <p className="mt-2">
           <strong>
             {p.reports_unreadable} rapport{plural(p.reports_unreadable)} TLS reçu
             {plural(p.reports_unreadable)} n'{p.reports_unreadable > 1 ? "ont" : "a"} pas
             pu être {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement
           </strong>{" "}
-          : son contenu n'a pas pu être normalisé et n'apparaît dans aucun chiffre
-          ci-dessus, y compris les échecs qu'il portait peut-être. Ce silence n'est en
-          aucun cas le signe que tout va bien.
+          : {p.reports_unreadable > 1 ? "leurs" : "son"} contenu
+          {plural(p.reports_unreadable)} n'{p.reports_unreadable > 1 ? "ont" : "a"} pas
+          pu être normalisé{plural(p.reports_unreadable)} et n'
+          {p.reports_unreadable > 1 ? "apparaissent" : "apparaît"} dans aucun
+          chiffre ci-dessus, y compris les échecs qu'{p.reports_unreadable > 1 ? "ils" : "il"}{" "}
+          {p.reports_unreadable > 1 ? "portaient" : "portait"} peut-être. Ce silence
+          n'est en aucun cas le signe que tout va bien.
         </p>
       )}
       {p.failures.length > 0 && (
