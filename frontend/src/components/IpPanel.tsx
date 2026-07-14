@@ -9,6 +9,19 @@ function verdict(d: IpIntel): { titre: string; ton: "danger" | "warn" | "ok" } {
   const autorise = d.spf.result === "pass";
   const nom = d.sender?.name;
 
+  // « Aucun SPF publié » n'est PAS « le SPF refuse cette IP ». Les deux mènent au même
+  // échec, mais pas au même geste : dans un cas on ajoute un mécanisme, dans l'autre on
+  // n'a tout simplement pas d'enregistrement SPF. Le dire de travers enverrait
+  // l'exploitant corriger ce qui n'existe pas.
+  if (d.spf.result === "none") {
+    return {
+      titre: nom
+        ? `${nom} — mais aucun SPF n'est publié sur votre domaine`
+        : "Aucun SPF n'est publié sur votre domaine : rien n'autorise cette IP",
+      ton: "danger",
+    };
+  }
+
   if (nom && autorise) return { titre: `${nom} — autorisée par votre SPF`, ton: "ok" };
   if (nom) return { titre: `${nom} — mais votre SPF ne l'autorise pas`, ton: "warn" };
   if (autorise) return { titre: "Expéditeur non identifié, mais autorisé par votre SPF", ton: "warn" };
