@@ -196,7 +196,55 @@ def test_activite_TLS_est_comptee(client_du_tenant, ligne_tls):
 
     assert a["messages"] == 0                      # aucune ligne DMARC : c'est vrai
     assert a["tls_sessions"] == 7
-    assert a["tls_failures"] == {"certificate-host-mismatch": 7}
+    assert a["tls_partial"] is False
+    assert a["tls_failures"] == {
+        "certificate-host-mismatch": {"sessions": 7, "partial": False}}
     # La ligne TLS porte un report_date valide : la période ne doit pas rester vide.
     assert a["first_seen"] == "2026-07-13"
     assert a["last_seen"] == "2026-07-13"
+
+
+def test_activite_TLS_sans_ligne_failure_est_un_vrai_zero(client_du_tenant):
+    """Aucune ligne `failure` TLS pour cette IP (elle n'a été vue qu'en DMARC) :
+    `tls_sessions` doit être `0` (un vrai zéro, aucun échec TLS observé) et non
+    `None` -- les deux ne veulent pas dire la même chose."""
+    client, _ = client_du_tenant
+
+    a = client.get("/ip-intel/203.0.113.9").json()["activity"]
+
+    assert a["tls_sessions"] == 0
+    assert a["tls_partial"] is False
+    assert a["tls_failures"] == {}
+
+
+def test_activite_TLS_echec_sans_nombre_nest_pas_affiche_comme_zero(
+        client_du_tenant, ligne_tls):
+    """Le bug corrigé : un `failure_sessions: null` produisait une entrée
+    `{"certificate-expired": 0}` -- un échec avéré affiché à zéro (`or 0` traitait
+    `null` comme un vrai zéro) -- et sous-comptait `tls_sessions` en silence. Une
+    session TLS en échec dont le nombre est illisible doit rester `None` (inconnu),
+    jamais `0` (aucun échec) : c'est exactement le contrat de `tls_posture`.
+
+    Deux lignes sur la MÊME IP : `ligne_tls` (7, lisible) et celle semée ici (`null`,
+    illisible) -- le connu (7) ne doit pas être effacé par l'inconnu, mais `partial`
+    doit le signaler.
+    """
+    client, tid = client_du_tenant
+    with get_session() as db:
+        rep_id = db.query(Report.id).filter_by(tenant_id=tid).first()[0]
+        db.add(ReportRow(tenant_id=tid, report_id=rep_id, data={
+            "kind": "failure", "result_type": "certificate-expired",
+            "sending_mta_ip": "203.0.113.44", "failure_sessions": None,
+            "policy_domain": "ip-test.example", "reporter": "Microsoft Corp.",
+            "report_date": "2026-07-13",
+        }))
+        db.commit()
+
+    a = client.get(f"/ip-intel/{ligne_tls}").json()["activity"]
+
+    assert a["tls_sessions"] == 7
+    assert a["tls_partial"] is True
+    assert a["tls_failures"] == {
+        "certificate-host-mismatch": {"sessions": 7, "partial": False},
+        "certificate-expired": {"sessions": None, "partial": True},
+    }

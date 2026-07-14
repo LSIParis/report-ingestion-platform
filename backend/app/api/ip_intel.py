@@ -32,6 +32,7 @@ from sqlalchemy import or_
 from app.auth.deps import get_db
 from app.db.models import IpIntel, ReportRow, Tenant
 from app.services import ip_intel, senders, spf
+from app.services.counters import int_or_none
 
 router = APIRouter(prefix="/ip-intel", tags=["ip-intel"])
 
@@ -62,6 +63,12 @@ def _activite(rows: list[ReportRow]) -> dict:
 
     Souvent l'élément décisif : « 412 messages, 100 % en échec, tous sur votre
     header_from, aucune signature DKIM » ne se lit pas comme « 3 messages ».
+
+    Meme honnetete que `tls_posture.posture()` pour les compteurs TLS (`failure_
+    sessions`) : un `null` ou une valeur non entiere n'est jamais lu comme 0, sous
+    peine d'afficher un echec avere ("certificate-expired": 0) et de sous-compter
+    `tls_sessions` en silence. Voir `int_or_none` (app.services.counters), partage
+    avec `tls_posture`. Contrat expose -- voir le retour de la fonction plus bas.
     """
     messages = 0
     dispositions: Counter[str] = Counter()
@@ -70,8 +77,14 @@ def _activite(rows: list[ReportRow]) -> dict:
     dkim_domains: set[str] = set()
     header_froms: set[str] = set()
     dates: list[str] = []
-    tls_sessions = 0
-    tls_failures: Counter[str] = Counter()
+
+    # Meme triplet de signaux que `tls_posture.posture()` (has_known/has_unknown),
+    # ici cumule sur TOUTES les lignes `failure` de cette IP (`tls_*`) et par
+    # `result_type` (`tls_types`) -- une entree par cause d'echec observee.
+    tls_known = 0
+    tls_has_known = False
+    tls_has_unknown = False
+    tls_types: dict[str, dict] = {}
 
     for r in rows:
         d = r.data
@@ -81,14 +94,21 @@ def _activite(rows: list[ReportRow]) -> dict:
             dates.append(str(d["report_date"]))
 
         if d.get("kind") == "failure":
-            n_tls = d.get("failure_sessions") or 0
-            try:
-                n_tls = int(n_tls)
-            except (TypeError, ValueError):
-                n_tls = 0
-            tls_sessions += n_tls
+            n_tls = int_or_none(d.get("failure_sessions"))
+            if n_tls is None:
+                tls_has_unknown = True
+            else:
+                tls_known += n_tls
+                tls_has_known = True
             if d.get("result_type"):
-                tls_failures[str(d["result_type"])] += n_tls
+                rt = str(d["result_type"])
+                entry = tls_types.setdefault(
+                    rt, {"total": 0, "has_known": False, "has_unknown": False})
+                if n_tls is None:
+                    entry["has_unknown"] = True
+                else:
+                    entry["total"] += n_tls
+                    entry["has_known"] = True
             continue
         n = d.get("message_count") or 0
         try:
@@ -108,6 +128,12 @@ def _activite(rows: list[ReportRow]) -> dict:
         if d.get("header_from"):
             header_froms.add(str(d["header_from"]))
 
+    # `tls_sessions` : la somme des occurrences LISIBLES si au moins une existe
+    # (un plancher si `tls_partial` est vrai) ; `None` si des lignes `failure`
+    # existent mais qu'AUCUNE n'est chiffrable (silence, pas un zero) ; `0`
+    # seulement si cette IP n'a aucune ligne `failure` du tout (vrai zero).
+    tls_sessions = tls_known if tls_has_known else (None if tls_has_unknown else 0)
+
     return {
         "messages": messages,
         "rows": len(rows),
@@ -119,7 +145,14 @@ def _activite(rows: list[ReportRow]) -> dict:
         "dkim_domains": sorted(dkim_domains),
         "header_froms": sorted(header_froms),
         "tls_sessions": tls_sessions,
-        "tls_failures": dict(tls_failures),
+        # `True` si au moins une session TLS en echec, sur cette IP, a un nombre
+        # illisible : `tls_sessions` (s'il n'est pas `None`) est alors un minorant.
+        "tls_partial": tls_has_unknown,
+        "tls_failures": {
+            rt: {"sessions": v["total"] if v["has_known"] else None,
+                 "partial": v["has_unknown"]}
+            for rt, v in tls_types.items()
+        },
     }
 
 
