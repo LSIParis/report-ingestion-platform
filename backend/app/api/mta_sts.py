@@ -12,6 +12,8 @@ Le domaine est déduit du **Host**, jamais d'un paramètre : un domaine non surv
 La politique vient de la BASE. Auparavant elle était embarquée dans une image Docker :
 ajouter un client imposait de modifier le dépôt, reconstruire et redéployer.
 """
+import hashlib
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.db.models import Tenant
@@ -34,11 +36,18 @@ def render(tenant: Tenant) -> str:
 
 
 def policy_id(tenant: Tenant) -> str:
-    """L'`id` à publier dans le TXT `_mta-sts`. Il DOIT changer à chaque modification de
-    la politique, sinon les expéditeurs gardent l'ancienne en cache jusqu'à expiration de
-    max_age. On le dérive de la date de dernière modification : impossible d'oublier de
-    l'incrémenter."""
-    return tenant.mta_sts_updated_at.strftime("%Y%m%d%H%M%S")
+    """L'`id` à publier dans le TXT `_mta-sts`.
+
+    Il DOIT changer dès que la politique change, sinon les expéditeurs gardent l'ancienne
+    en cache jusqu'à expiration de max_age — et on ne peut rien y faire.
+
+    On le dérive du CONTENU de la politique, pas d'un horodatage. Deux conséquences, les
+    deux souhaitables : il change si et seulement si la politique change (impossible de
+    l'oublier), et réenregistrer une politique identique n'oblige pas à retoucher le DNS
+    pour rien. Un horodatage à la seconde échouait sur les deux plans : deux
+    modifications dans la même seconde produisaient le même id.
+    """
+    return hashlib.sha256(render(tenant).encode()).hexdigest()[:20]
 
 
 @router.get("/.well-known/mta-sts.txt", response_class=Response)

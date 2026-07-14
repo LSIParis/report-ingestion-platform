@@ -76,13 +76,28 @@ def test_plusieurs_mx_donnent_plusieurs_lignes():
     assert "mx: mx1.x.test\r\nmx: mx2.x.test\r\n" in render(t)
 
 
-def test_l_id_derive_de_la_date_de_modification():
-    """L'id publié dans le DNS doit changer à chaque modification, sinon les expéditeurs
-    gardent l'ancienne politique en cache. En le dérivant de la date, on ne peut pas
-    oublier de l'incrémenter."""
-    t = Tenant(domain="x.test", name="X",
-               mta_sts_updated_at=datetime(2026, 7, 14, 11, 22, 33, tzinfo=timezone.utc))
-    assert policy_id(t) == "20260714112233"
+def test_l_id_derive_du_contenu_de_la_politique():
+    """L'id doit changer dès que la politique change — sinon les expéditeurs gardent
+    l'ancienne en cache jusqu'à expiration de max_age, et on ne peut rien y faire.
+
+    Il est dérivé du CONTENU, pas d'un horodatage : un horodatage à la seconde donnait le
+    même id à deux modifications rapprochées (bug réel, attrapé par le test suivant)."""
+    a = Tenant(domain="x.test", name="X", mta_sts_mode="testing",
+               mta_sts_max_age=86400, mta_sts_mx=["mx.x.test"])
+    b = Tenant(domain="x.test", name="X", mta_sts_mode="enforce",   # mode différent
+               mta_sts_max_age=86400, mta_sts_mx=["mx.x.test"])
+    c = Tenant(domain="x.test", name="X", mta_sts_mode="testing",
+               mta_sts_max_age=604800, mta_sts_mx=["mx.x.test"])    # max_age différent
+
+    assert policy_id(a) != policy_id(b)
+    assert policy_id(a) != policy_id(c)
+
+
+def test_une_politique_identique_garde_le_meme_id():
+    """Réenregistrer sans rien changer ne doit PAS obliger à retoucher le DNS."""
+    kw = dict(domain="x.test", name="X", mta_sts_mode="testing",
+              mta_sts_max_age=86400, mta_sts_mx=["mx.x.test"])
+    assert policy_id(Tenant(**kw)) == policy_id(Tenant(**kw))
 
 
 # --------------------------------------------------- service HTTP
