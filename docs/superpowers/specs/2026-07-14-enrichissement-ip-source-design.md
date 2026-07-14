@@ -35,20 +35,19 @@ Suivi des éléments qui fondent ce verdict, et d'une conclusion actionnable.
 
 ## Périmètre
 
-**Inclus** — quatre signaux, tous obtenus **en DNS**, sans API tierce, sans clé, sans
-qu'aucune donnée de nos clients ne sorte de la plateforme :
+**Inclus** — quatre signaux obtenus **en DNS**, sans API tierce, sans clé, sans qu'aucune
+donnée de nos clients ne sorte de la plateforme, plus un catalogue local :
 
 1. **PTR + FCrDNS** — le nom inverse, et sa validation aller-retour.
 2. **ASN, organisation, pays** — via le service DNS public de Team Cymru.
 3. **Couverture SPF** — cette IP est-elle autorisée par le SPF du domaine surveillé ?
 4. **Activité de l'IP pour ce tenant** — volume, période, dispositions, alignement,
    domaines vus dans `auth_spf` / `auth_dkim`.
+5. **Catalogue d'expéditeurs connus** — voir plus bas. Sa valeur n'est pas le nom, c'est
+   **la remédiation**.
 
 **Exclu, délibérément** :
 
-- *Catalogue d'expéditeurs connus* (fichier JSON : suffixe rDNS / ASN → « Brevo »,
-  « Amazon SES »). Le PTR et l'ASN identifient déjà bien les gros routeurs. À faire
-  quand le besoin se manifestera, sur le modèle de `profiles/` : un fichier, aucun code.
 - *Listes noires (DNSBL)*. Leur usage via un résolveur public est interdit au-delà d'un
   faible volume ; Spamhaus impose une clé DQS. Dépendance externe payante pour un signal
   moins décisif que la couverture SPF.
@@ -106,6 +105,46 @@ que le rejet vient de l'alignement, pas de l'autorisation — deux corrections o
 Le SPF n'est **pas** mis en cache avec l'IP : il dépend du couple (domaine, IP) et
 l'enregistrement du client change. Il est recalculé à chaque consultation.
 
+### Le catalogue d'expéditeurs — `backend/senders/<clé>.json`
+
+Même convention que `profiles/` : **un fichier, aucun code, aucun déploiement.** Chargés
+au démarrage (le catalogue est petit), rechargés à chaud n'est pas nécessaire.
+
+```json
+{
+  "name": "SendGrid",
+  "ptr_suffixes": [".sendgrid.net"],
+  "asn": [11377, 396507],
+  "spf_include": "sendgrid.net",
+  "remediation": "Ajoutez `include:sendgrid.net` à votre SPF, puis activez la signature
+                  DKIM (Sender Authentication) dans la console SendGrid."
+}
+```
+
+**Le piège, et la règle qui l'évite.** Un catalogue naïf ne se contente pas d'être
+inutile : il fabrique des affirmations fausses, et rassurantes. AS16509 est Amazon — mais
+l'écrasante majorité de ses IP sont des EC2 quelconques, pas Amazon SES : une entrée
+« AS16509 → Amazon SES » étiquetterait « Amazon SES » une VM louée par un usurpateur.
+AS15169 couvre Gmail, Google Workspace *et* des VM GCP. D'où :
+
+1. **Le suffixe PTR est la seule clé qui nomme** — et **uniquement si le FCrDNS est
+   vérifié**. Sans l'aller-retour, n'importe qui pose un PTR menteur et se fait passer
+   pour SendGrid. Un PTR incohérent qui matche le catalogue → **pas d'identification**,
+   et l'incohérence est affichée comme un signal en soi.
+2. **Une correspondance par ASN seul ne nomme jamais l'expéditeur.** Elle dit
+   « *hébergé chez* Amazon » — ce qui n'autorise rien et ne rassure de rien. Elle sert à
+   situer, pas à conclure.
+3. **Le catalogue ne contredit jamais les faits DNS.** Il se pose par-dessus ; il
+   n'écrase ni la couverture SPF, ni le FCrDNS. Un expéditeur reconnu **et** non couvert
+   par le SPF reste un échec — c'est même le cas le plus utile : « SendGrid, mais votre
+   SPF ne l'autorise pas », avec la remédiation exacte à appliquer.
+4. **Une entrée absente ne bloque rien.** Le catalogue est un bonus ; sans lui, le
+   panneau affiche les faits DNS bruts, comme s'il n'existait pas.
+
+Le contenu initial se limite aux routeurs qu'on rencontre réellement (Microsoft 365,
+Google Workspace, SendGrid, Brevo, Mailjet, Amazon SES, Mailchimp) — via leurs suffixes
+PTR, pas leurs ASN.
+
 ### `ip_intel` — le cache, et l'écart assumé à l'invariant n°1
 
 ```
@@ -126,6 +165,11 @@ pas sonder l'existence d'une IP chez un autre client : le canal de fuite est fer
 
 Fraîcheur : `checked_at` de plus de 7 jours → réinterrogé. Bouton « réinterroger »
 explicite dans le panneau.
+
+**Le cache ne stocke pas l'expéditeur reconnu**, seulement les faits DNS. L'appariement
+avec le catalogue se fait à la lecture. Conséquence voulue : corriger une entrée du
+catalogue, ou en ajouter une, prend effet **immédiatement** sur tout l'historique — sans
+purge de cache, sans rejeu. Une erreur de catalogue reste réparable par un fichier.
 
 Index nécessaire à la vérification d'appartenance et au résumé d'activité :
 
@@ -162,12 +206,13 @@ un rendu DMARC : **IP source cliquable**, volume, disposition en badge, aligneme
 **`components/IpPanel.tsx`** : panneau latéral, dans cet ordre — le verdict d'abord, les
 preuves ensuite, l'action pour finir :
 
-1. **Verdict** : expéditeur identifié ou non, autorisé par le SPF ou non. Sans catalogue,
-   « identifié » veut dire : l'organisation de l'ASN ou le suffixe du PTR le nomment —
-   on affiche ce que le DNS dit, tel quel, sans le traduire en marque.
+1. **Verdict** : expéditeur identifié ou non (catalogue, sur PTR vérifié), autorisé par
+   le SPF ou non. Les deux sont indépendants : « SendGrid, mais votre SPF ne l'autorise
+   pas » est un verdict parfaitement cohérent — et le plus utile de tous.
 2. **Preuves** : PTR (+ badge *vérifié* / *incohérent*), ASN + organisation + pays,
    mécanisme SPF, activité observée.
-3. **Conclusion actionnable** : autoriser — et comment — ou ignorer : usurpation probable.
+3. **Conclusion actionnable** : la `remediation` du catalogue si l'expéditeur est
+   reconnu — sinon, ignorer : usurpation probable.
 
 ## Erreurs et dégradation
 
@@ -178,6 +223,7 @@ preuves ensuite, l'action pour finir :
 | PTR incohérent (FCrDNS échoué) | Affiché comme incohérent, ce qui est une information, pas une erreur. |
 | SPF avec macro / `ptr` / `exists` | `indéterminé`, explicitement. Jamais un `fail` inventé. |
 | SPF dépassant 10 requêtes DNS | `permerror` — c'est un vrai défaut du domaine, on le dit. |
+| PTR matchant le catalogue mais FCrDNS échoué | **Non identifié.** Un PTR menteur ne doit pas blanchir un usurpateur. |
 | IP inconnue du tenant | 404, avant toute interrogation DNS ou lecture du cache. |
 
 ## Tests
@@ -185,6 +231,15 @@ preuves ensuite, l'action pour finir :
 - **`test_ip_intel.py`** (résolveur DNS moqué) : PTR nominal ; FCrDNS incohérent ;
   parsing des réponses Team Cymru (IPv4 et IPv6) ; chaîne `include` ; **limite des 10
   requêtes DNS** ; macro → `indéterminé` ; timeout → « inconnu », pas d'exception.
+- **`test_senders.py`** — le catalogue ne doit jamais mentir :
+  - PTR `x.sendgrid.net` **avec FCrDNS vérifié** → identifié SendGrid, remédiation servie.
+  - **Même PTR, FCrDNS échoué → NON identifié.** C'est le test qui compte : sans lui, un
+    usurpateur pose un PTR menteur et notre écran le blanchit.
+  - ASN seul (AS16509, PTR quelconque d'EC2) → « hébergé chez Amazon », **jamais**
+    « Amazon SES ».
+  - Expéditeur reconnu mais SPF non couvrant → verdict d'échec conservé, remédiation
+    affichée. Le catalogue n'écrase pas les faits.
+  - Aucune entrée ne matche → faits DNS bruts, aucune dégradation.
 - **`test_ip_intel_api.py`** : 404 sur IP inconnue du tenant ; cache frais → aucune
   requête DNS ; cache périmé → réinterrogation ; résumé d'activité correct.
 - **`tests/test_tenant_isolation.py`** (bloquant, à compléter) : **le tenant A qui
