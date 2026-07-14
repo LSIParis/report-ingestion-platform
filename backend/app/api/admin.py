@@ -152,6 +152,15 @@ def tenant_onboarding(tenant_id: str):
     produisent aucune alerte, elles se traduisent seulement par des rapports qui
     n'arrivent jamais.
     """
+    # Sans ces réglages, les contrôles interrogeraient des noms tronqués et
+    # rapporteraient « à faire » pour des enregistrements pourtant corrects. Une liste
+    # de contrôle qui ment est pire qu'aucune liste : on refuse de la produire.
+    if not settings.collection_mailbox or not settings.reporting_domain:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "COLLECTION_MAILBOX n'est pas configuré : impossible de vérifier vers quelle "
+            "boîte les rapports doivent être envoyés.")
+
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:
         tenant = db.get(Tenant, tenant_id)
         if not tenant:

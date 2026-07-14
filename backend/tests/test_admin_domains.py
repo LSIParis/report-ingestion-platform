@@ -114,6 +114,26 @@ def test_suppression_dun_domaine_vierge(client, cleanup):
         assert db.query(TenantMatchingRule).filter_by(tenant_id=tid).count() == 0
 
 
+def test_procedure_refusee_si_la_boite_de_collecte_n_est_pas_configuree(
+        client, cleanup, monkeypatch):
+    """Sans COLLECTION_MAILBOX, les contrôles interrogeraient des noms tronqués et
+    diraient « à faire » pour des enregistrements corrects. Une liste de contrôle qui
+    ment est pire qu'aucune liste : on refuse de la produire.
+
+    Bug réellement rencontré : IMAP_USER n'était passé qu'au conteneur imap-worker,
+    pas à l'API — la procédure signalait comme manquantes des autorisations posées.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "collection_mailbox", "", raising=False)
+
+    tid = client.post("/admin/tenants", json={"domain": _domain()}).json()["id"]
+    cleanup.append(tid)
+
+    r = client.get(f"/admin/tenants/{tid}/onboarding")
+    assert r.status_code == 503
+    assert "COLLECTION_MAILBOX" in r.json()["detail"]
+
+
 def test_un_domaine_qui_a_collecte_ne_peut_pas_etre_supprime(client, cleanup):
     """Le supprimer effacerait l'historique du client. On refuse, et on oriente vers
     la suspension — qui coupe la collecte sans rien détruire."""

@@ -132,8 +132,11 @@ services:
       # (une ligne par variable), donc une valeur multiligne y est impossible.
       JWT_PUBLIC_KEY_B64: ${JWT_PUBLIC_KEY_B64}
       JWT_PRIVATE_KEY_B64: ${JWT_PRIVATE_KEY_B64}
-      # Procédure d'ajout d'un domaine. COLLECTION_MAILBOX est déduit d'IMAP_USER si
-      # absent : la boîte annoncée aux clients ne peut pas diverger de celle qu'on relève.
+      # Procédure d'ajout d'un domaine : l'API doit connaître la boîte de collecte pour
+      # vérifier que les rapports d'un domaine pointent bien vers ELLE. On passe
+      # IMAP_USER (et non un réglage séparé) pour que la boîte annoncée aux clients ne
+      # puisse pas diverger de celle qu'on relève réellement.
+      COLLECTION_MAILBOX: ${IMAP_USER}
       MTA_STS_IP: ${MTA_STS_IP:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
 
