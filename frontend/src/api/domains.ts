@@ -13,8 +13,37 @@ export interface Domain {
   created_at: string;
 }
 
+export interface Step {
+  key: string;
+  title: string;
+  why: string;
+  zone: string;
+  status: "ok" | "todo" | "warn" | "unknown";
+  detail: string;
+  record: { type: string; name: string; value: string } | null;
+  found: string | null;
+}
+
+export interface Onboarding {
+  domain: string;
+  mx: string[];
+  mx_policy: string[];
+  steps: Step[];
+}
+
 export const useDomains = () =>
   useQuery({ queryKey: ["domains"], queryFn: () => api<Domain[]>("/admin/tenants") });
+
+/* La procédure est VÉRIFIÉE côté serveur à chaque appel (résolution DNS en direct).
+   On ne la met donc pas en cache : une procédure périmée est pire qu'aucune. */
+export const useOnboarding = (id: string | null) =>
+  useQuery({
+    queryKey: ["onboarding", id],
+    queryFn: () => api<Onboarding>(`/admin/tenants/${id}/onboarding`),
+    enabled: !!id,
+    gcTime: 0,
+    staleTime: 0,
+  });
 
 const invalidate = (qc: ReturnType<typeof useQueryClient>) => () => {
   qc.invalidateQueries({ queryKey: ["domains"] });

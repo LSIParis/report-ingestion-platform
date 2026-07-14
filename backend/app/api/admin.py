@@ -8,8 +8,10 @@ from sqlalchemy import func
 
 from app.auth.deps import get_tenant_ctx, require_role
 from app.auth.passwords import hash_password
+from app.config import settings
 from app.db.models import AppUser, Email, Report, Tenant, TenantMatchingRule, UserTenant
 from app.db.session import tenant_scoped_session
+from app.services import onboarding
 from app.services.audit import audit
 from app.services.rules import RuleError
 from app.services.rules import validate as validate_rule
@@ -139,6 +141,29 @@ def delete_tenant(tenant_id: str, ctx=Depends(get_tenant_ctx)):
 
     audit(actor=ctx.user, action="tenant.deleted", target_id=tenant_id,
           metadata={"domain": domain})
+
+
+@router.get("/tenants/{tenant_id}/onboarding")
+def tenant_onboarding(tenant_id: str):
+    """Procédure de mise en conformité du domaine, VÉRIFIÉE en direct sur le DNS.
+
+    Un runbook qu'on va relire ailleurs est un runbook qu'on oublie : celui-ci dit ce
+    qui est fait, ce qui manque, et ce qui est faux — les erreurs de ce domaine ne
+    produisent aucune alerte, elles se traduisent seulement par des rapports qui
+    n'arrivent jamais.
+    """
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Domaine introuvable")
+        domain = tenant.domain
+
+    return onboarding.build(
+        domain,
+        mailbox=settings.collection_mailbox,
+        reporting_domain=settings.reporting_domain,
+        mta_sts_ip=settings.mta_sts_ip,
+    ).as_dict()
 
 
 @router.post("/quarantine/requeue", status_code=status.HTTP_202_ACCEPTED)

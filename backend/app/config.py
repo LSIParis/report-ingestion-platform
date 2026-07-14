@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     clamav_host: str = "clamav"
     clamav_port: int = 3310
 
+    # --- Procédure d'ajout d'un domaine (vérification DNS en direct) ---
+    # Adresse où les domaines surveillés doivent envoyer leurs rapports. Par défaut la
+    # boîte relevée par l'ingestion : les deux ne peuvent pas diverger.
+    collection_mailbox: str = ""
+    # Domaine qui doit publier les autorisations de collecte externe (X._report._dmarc).
+    reporting_domain: str = ""
+    # IP de l'hôte qui sert les politiques MTA-STS (enregistrement A `mta-sts.<domaine>`).
+    mta_sts_ip: str = ""
+
     # --- Observabilité ---
     sentry_dsn: str = ""
 
@@ -63,6 +72,14 @@ class Settings(BaseSettings):
             if b64:
                 object.__setattr__(
                     self, name, base64.b64decode(b64).decode("utf-8"))
+
+        # La boîte de collecte annoncée aux clients EST celle qu'on relève : les faire
+        # diverger produirait une procédure qui envoie les rapports dans le vide.
+        if not self.collection_mailbox and self.imap_user:
+            object.__setattr__(self, "collection_mailbox", self.imap_user)
+        if not self.reporting_domain and "@" in self.collection_mailbox:
+            object.__setattr__(self, "reporting_domain",
+                               self.collection_mailbox.split("@", 1)[1])
 
 
 @lru_cache
