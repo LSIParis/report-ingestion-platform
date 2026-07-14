@@ -268,7 +268,14 @@ export function MtaStsPanel({
    n'a aucune donnée. Le dire autrement ferait durcir à l'aveugle, ce que TLS-RPT sert
    précisément à éviter. */
 function TlsVerdict({ p }: { p: TlsPosture }) {
-  if (p.sessions_total === 0) {
+  // sessions_total ne vient que des lignes `summary` (voir tls_posture.py) : un compteur
+  // de succès illisible avec 0 échec RESUME donne sessions_total === 0 alors que des
+  // rapports sont bel et bien arrivés (incomplete_rows > 0), et des lignes `failure`
+  // peuvent exister même quand leur `summary` a été rejeté par la normalisation
+  // (failures non vide). Dans ces deux cas, « aucun rapport reçu » est faux et
+  // avalerait silencieusement des échecs ou de l'incomplétude connus. On ne bascule
+  // dans la branche « aucune donnée » que si RIEN de tout cela n'est connu.
+  if (p.sessions_total === 0 && p.failures.length === 0 && p.incomplete_rows === 0) {
     return (
       <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
         <strong>Aucun rapport TLS reçu sur {p.days} jours.</strong> On ne sait donc pas si
@@ -296,16 +303,17 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
     );
   }
 
-  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport), ou ni
-  // l'un ni l'autre : trois situations distinctes qui font toutes échouer safe_to_enforce,
-  // et qu'on ne confond jamais entre elles. On ne dit « données incomplètes » que si
-  // p.incomplete_rows > 0 le confirme réellement — jamais par déduction du seul fait
-  // qu'on est arrivé dans cette branche (rien ne garantit ce lien côté TypeScript).
-  // La phrase de clôture diffère selon la branche : quand il y a des échecs connus, on peut
-  // parler de « ces messages » sans mentir. Quand il y a de l'incomplétude constatée, on
-  // n'affirme que de l'incertitude, pas un fait. Et quand ni l'un ni l'autre n'est établi
-  // (résiduel), on se contente de dire que le feu vert n'est pas garanti — jamais plus que
-  // ce que les données montrent.
+  // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport), ou des
+  // échecs connus par le détail seul (le résumé qui les aurait comptés a été rejeté par la
+  // normalisation), ou ni l'un ni l'autre : quatre situations distinctes qui font toutes
+  // échouer safe_to_enforce, et qu'on ne confond jamais entre elles. On ne dit « données
+  // incomplètes » que si p.incomplete_rows > 0 le confirme réellement — jamais par
+  // déduction du seul fait qu'on est arrivé dans cette branche (rien ne garantit ce lien
+  // côté TypeScript). La phrase de clôture diffère selon la branche : quand il y a des
+  // échecs connus (comptés OU seulement décrits dans `failures`), on peut en parler comme
+  // d'un fait. Quand il y a de l'incomplétude constatée, on n'affirme que de l'incertitude,
+  // pas un fait. Et quand rien de tout cela n'est établi (résiduel), on se contente de dire
+  // que le feu vert n'est pas garanti — jamais plus que ce que les données montrent.
   return (
     <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
       {p.sessions_failed > 0 ? (
@@ -323,6 +331,18 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
           (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées). Impossible
           de garantir qu'aucun message ne serait refusé en mode appliqué : les rapports
           reçus sont incomplets.
+        </>
+      ) : p.failures.length > 0 ? (
+        <>
+          {/* Le résumé qui aurait dû compter ces sessions a été rejeté par la
+              normalisation (compteur illisible) : sessions_total et sessions_failed
+              restent à 0, mais les lignes de détail, elles, ont survécu et décrivent
+              des échecs réels. On ne dit pas « aucun échec connu » quand la liste
+              ci-dessous en affiche. */}
+          <strong>Des échecs de chiffrement sont connus sur {p.days} jours.</strong>{" "}
+          Aucun résumé exploitable ne les a comptés (compteur illisible), mais le détail
+          ci-dessous les documente. Le passage en mode appliqué ne peut pas être garanti
+          sûr.
         </>
       ) : (
         <>

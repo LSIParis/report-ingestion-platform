@@ -60,8 +60,15 @@ function RowsTable({ reportId }: { reportId: string }) {
   const [ip, setIp] = useState<string | null>(null);
   const { data, isLoading } = useReportRows(reportId, page);
   if (isLoading) return <p>Chargement…</p>;
-  const rows = data!.items;
-  if (!rows.length) return <p className="text-gray-500">Aucune donnée.</p>;
+  const items = data!.items;
+  if (!items.length) return <p className="text-gray-500">Aucune donnée.</p>;
+
+  // L'API renvoie des enveloppes `{ id, report_date, data }` : les clés métier
+  // (source_ip, kind, policy_domain…) vivent dans `data`, jamais à la racine. Sans ce
+  // dépli, isDmarc/isTls valent toujours false et GenericTable affiche
+  // littéralement `[object Object]` — c'était le bug qui rendait DmarcTable et
+  // TlsTable inatteignables.
+  const rows = items.map((r) => r.data as Record<string, unknown>);
 
   // Chaque famille se reconnaît à ses DONNÉES, pas à un nom de profil : `Report` ne
   // stocke pas le format, seulement source_type (attachment/body) et profile_id.
@@ -80,7 +87,7 @@ function RowsTable({ reportId }: { reportId: string }) {
       <div className="flex gap-2 mt-4 items-center">
         <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="disabled:opacity-40">←</button>
         <span className="text-sm">Page {page} · {data?.total} lignes</span>
-        <button disabled={rows.length < 50} onClick={() => setPage(page + 1)} className="disabled:opacity-40">→</button>
+        <button disabled={items.length < 50} onClick={() => setPage(page + 1)} className="disabled:opacity-40">→</button>
       </div>
       {ip && <IpPanel ip={ip} onClose={() => setIp(null)} />}
     </>
