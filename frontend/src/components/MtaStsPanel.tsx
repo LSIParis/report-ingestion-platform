@@ -272,10 +272,19 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
   // de succès illisible avec 0 échec RESUME donne sessions_total === 0 alors que des
   // rapports sont bel et bien arrivés (incomplete_rows > 0), et des lignes `failure`
   // peuvent exister même quand leur `summary` a été rejeté par la normalisation
-  // (failures non vide). Dans ces deux cas, « aucun rapport reçu » est faux et
-  // avalerait silencieusement des échecs ou de l'incomplétude connus. On ne bascule
-  // dans la branche « aucune donnée » que si RIEN de tout cela n'est connu.
-  if (p.sessions_total === 0 && p.failures.length === 0 && p.incomplete_rows === 0) {
+  // (failures non vide). Un rapport TLS peut aussi n'avoir laissé AUCUNE ligne du tout
+  // (policy-domain illisible → rapport rejeté en bloc avant normalisation) :
+  // reports_unreadable le signale alors que sessions_total/failures/incomplete_rows
+  // restent tous à zéro, puisqu'aucun d'eux ne lit jamais que `report_row`. Dans ces
+  // trois cas, « aucun rapport reçu » est faux et avalerait silencieusement des
+  // échecs, de l'incomplétude, ou un rapport jamais lu. On ne bascule dans la branche
+  // « aucune donnée » que si RIEN de tout cela n'est connu.
+  if (
+    p.sessions_total === 0 &&
+    p.failures.length === 0 &&
+    p.incomplete_rows === 0 &&
+    p.reports_unreadable === 0
+  ) {
     return (
       <div className="rounded border border-gray-300 bg-gray-50 p-3 text-xs text-gray-700">
         <strong>Aucun rapport TLS reçu sur {p.days} jours.</strong> On ne sait donc pas si
@@ -305,15 +314,16 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
 
   // Des échecs, ou des données incomplètes (un compteur manquant dans un rapport), ou des
   // échecs connus par le détail seul (le résumé qui les aurait comptés a été rejeté par la
-  // normalisation), ou ni l'un ni l'autre : quatre situations distinctes qui font toutes
-  // échouer safe_to_enforce, et qu'on ne confond jamais entre elles. On ne dit « données
-  // incomplètes » que si p.incomplete_rows > 0 le confirme réellement — jamais par
-  // déduction du seul fait qu'on est arrivé dans cette branche (rien ne garantit ce lien
-  // côté TypeScript). La phrase de clôture diffère selon la branche : quand il y a des
-  // échecs connus (comptés OU seulement décrits dans `failures`), on peut en parler comme
-  // d'un fait. Quand il y a de l'incomplétude constatée, on n'affirme que de l'incertitude,
-  // pas un fait. Et quand rien de tout cela n'est établi (résiduel), on se contente de dire
-  // que le feu vert n'est pas garanti — jamais plus que ce que les données montrent.
+  // normalisation), ou un rapport entier jamais lu (reports_unreadable), ou aucun de ces
+  // signaux : cinq situations distinctes qui font toutes échouer safe_to_enforce, et
+  // qu'on ne confond jamais entre elles. On ne dit « données incomplètes » que si
+  // p.incomplete_rows > 0 le confirme réellement — jamais par déduction du seul fait
+  // qu'on est arrivé dans cette branche (rien ne garantit ce lien côté TypeScript). La
+  // phrase de clôture diffère selon la branche : quand il y a des échecs connus (comptés
+  // OU seulement décrits dans `failures`), on peut en parler comme d'un fait. Quand il y a
+  // de l'incomplétude ou un rapport illisible, on n'affirme que de l'incertitude, pas un
+  // fait. Et quand rien de tout cela n'est établi (résiduel), on se contente de dire que
+  // le feu vert n'est pas garanti — jamais plus que ce que les données montrent.
   return (
     <div className="rounded border border-red-300 bg-red-50 p-3 text-xs text-red-900">
       {p.sessions_failed > 0 ? (
@@ -344,12 +354,27 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
           ci-dessous les documente. Le passage en mode appliqué ne peut pas être garanti
           sûr.
         </>
+      ) : p.reports_unreadable > 0 ? (
+        <>
+          {/* Aucune ligne persistée pour ce(s) rapport(s) : sessions_total, failures et
+              incomplete_rows n'en savent rien, puisqu'ils ne lisent que report_row.
+              "Je n'ai pas su te lire" ne doit jamais se lire "rien à signaler". */}
+          <strong>
+            Aucun échec visible, mais {p.reports_unreadable} rapport
+            {plural(p.reports_unreadable)} TLS reçu{plural(p.reports_unreadable)} sur{" "}
+            {p.days} jours n'{p.reports_unreadable > 1 ? "ont" : "a"} pas pu être{" "}
+            {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement.
+          </strong>{" "}
+          Son contenu — échecs éventuels compris — n'a jamais atteint les chiffres
+          ci-dessus : on ne sait donc pas tout, et le passage en mode appliqué ne peut
+          pas être garanti sûr.
+        </>
       ) : (
         <>
           <strong>Le feu vert n'est pas atteint sur {p.days} jours.</strong>{" "}
           (sur {p.sessions_total.toLocaleString("fr-FR")} sessions rapportées, aucun échec
-          connu, aucune incomplétude constatée). Le passage en mode appliqué ne peut pas
-          être garanti sûr avec les données disponibles.
+          connu, aucune incomplétude constatée, aucun rapport illisible). Le passage en
+          mode appliqué ne peut pas être garanti sûr avec les données disponibles.
         </>
       )}
       {p.incomplete_rows > 0 && (
@@ -361,6 +386,18 @@ function TlsVerdict({ p }: { p: TlsPosture }) {
           : un fournisseur a rapporté un résultat sans indiquer combien de sessions il
           couvrait. Le nombre réel d'échecs peut donc être supérieur à ce qui est affiché
           ici — on ne peut pas garantir l'exhaustivité.
+        </p>
+      )}
+      {p.reports_unreadable > 0 && (
+        <p className="mt-2">
+          <strong>
+            {p.reports_unreadable} rapport{plural(p.reports_unreadable)} TLS reçu
+            {plural(p.reports_unreadable)} n'{p.reports_unreadable > 1 ? "ont" : "a"} pas
+            pu être {p.reports_unreadable > 1 ? "lus" : "lu"} entièrement
+          </strong>{" "}
+          : son contenu n'a pas pu être normalisé et n'apparaît dans aucun chiffre
+          ci-dessus, y compris les échecs qu'il portait peut-être. Ce silence n'est en
+          aucun cas le signe que tout va bien.
         </p>
       )}
       {p.failures.length > 0 && (

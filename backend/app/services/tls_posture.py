@@ -49,19 +49,40 @@ Deux pièges, tous deux mortels, tous deux évités ici :
    `safe_to_enforce` est un BOOLEEN distinct qui doit rester `False` des qu'un echec
    connu existe, peu importe par quelle ligne il a ete vu.
 
+ - Ne pas supposer qu'un rapport rejeté laisse toujours une trace dans `report_row` :
+   une politique dont le `policy-domain` est illisible ne laisse AUCUNE ligne du
+   tout (`Report.status == "failed"`, zéro `ReportRow`). `sessions_failed`,
+   `incomplete_rows` et `failures` sont alors tous à leur valeur la plus rassurante,
+   alors que ce rapport pouvait porter des dizaines d'échecs. `reports_unreadable`
+   compte ces rapports directement sur `Report.status`/`profile_id`, PAS sur
+   `report_row` : c'est le seul endroit qui sait qu'un rapport est arrivé même quand
+   son contenu n'a jamais atteint la table qu'interroge le reste de cette fonction.
+
 Le service ne connaît pas le tenant : il reçoit une session **déjà scopée**. C'est ce qui
 le rend testable seul et incapable de fuiter — aucun `WHERE tenant_id` applicatif, la RLS
 fait le travail (CLAUDE.md).
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from app.db.models import ReportRow
+from app.db.models import Report, ReportRow
 from app.services.counters import int_or_none as _int_or_none
 
 _kind = ReportRow.data["kind"].astext
 _report_date = ReportRow.data["report_date"].astext
+
+# Le profil TLS est TOUJOURS `_default_tlsrpt_json` : `select_profile()` (voir
+# `app.normalization.profiles`) ne sert un profil `{domaine}_tlsrpt_json` que si un
+# fichier spécifique existe pour ce tenant, ce qui n'est le cas d'aucun tenant du
+# dépôt aujourd'hui -- le format TLS-RPT est normalisé (RFC 8460), il n'y a donc
+# aucune raison de dupliquer un mapping par domaine, contrairement aux profils
+# `{marque}_csv`/`{marque}_xlsx` propres à chaque expéditeur. C'est ce nom de
+# fichier, posé sur `Report.profile_id` par `PersistenceService.persist` (voir
+# `app.workers.tasks._process_source`), qui permet de reconnaître un rapport TLS
+# SANS dépendre du contenu de `report_row` -- justement ce qui manque quand ce
+# contenu n'existe pas.
+_TLS_PROFILE_ID = "_default_tlsrpt_json"
 
 
 def posture(db, days: int = 30) -> dict:
@@ -71,6 +92,32 @@ def posture(db, days: int = 30) -> dict:
               .filter(_kind.in_(("summary", "failure")))
               .filter(_report_date >= cutoff)
               .all())
+
+    # Un rapport TLS peut échouer à se normaliser AVANT qu'aucune ligne n'existe :
+    # `TLSRPT_BAD_POLICY` (compteur de résumé illisible) peut faire tomber la seule
+    # politique du rapport, qui fait à son tour tomber `policy_domain` ->
+    # `TLSRPT_NO_POLICY_DOMAIN` -> `ParseResult(status="failed")`, ZÉRO ligne
+    # persistée. Un tel rapport ne laisse absolument AUCUNE trace dans `report_row` :
+    # ni `sessions_failed`, ni `incomplete_rows`, ni `failures` ne peuvent le voir,
+    # puisque ces trois champs ne lisent QUE `report_row`. Il faut donc consulter
+    # `Report.status` directement -- la seule table qui sait qu'un rapport est arrivé
+    # même quand son contenu n'a jamais atteint `report_row`.
+    #
+    # Fenêtre de temps : `Report.created_at` (date de RÉCEPTION/traitement chez nous),
+    # PAS `report_date` (date du rapport côté fournisseur, un champ de `ReportRow.data`
+    # qui n'existe tout simplement pas ici puisqu'aucune ligne n'a été persistée). Les
+    # deux dates répondent à des questions différentes : `report_date` demande "quel
+    # jour ce rapport décrit-il ?", `created_at` demande "quand avons-nous appris que
+    # nous ne savions pas ?" -- c'est cette seconde question que ce garde pose, la
+    # première n'a pas de réponse pour un rapport qui n'a jamais été normalisé.
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    reports_unreadable = (
+        db.query(Report)
+          .filter(Report.profile_id == _TLS_PROFILE_ID)
+          .filter(Report.status != "ok")
+          .filter(Report.created_at >= cutoff_dt)
+          .count()
+    )
 
     sessions_ok = 0
     sessions_failed = 0
@@ -170,10 +217,21 @@ def posture(db, days: int = 30) -> dict:
         # absent ou non entier). Exposé tel quel : c'est à l'appelant (l'écran enforce)
         # de savoir qu'il existe des lignes muettes, pas seulement des échecs à zéro.
         "incomplete_rows": incomplete_rows,
-        # Des données, aucun échec, ET rien d'illisible. Le silence n'est pas une
-        # preuve — ni au niveau du domaine (aucun rapport), ni au niveau du champ
-        # (un compteur absent dans un rapport reçu). Une seule ligne incomplète suffit
-        # à refuser : on ne dit « c'est sûr » que si on a réellement TOUT lu.
+        # Nombre de RAPPORTS TLS (pas de lignes) dont on n'a jamais pu lire le contenu
+        # -- `Report.status != "ok"` sur le profil TLS, dans la fenêtre. Distinct
+        # d'`incomplete_rows` : celui-ci compte des lignes `summary` PARTIELLEMENT
+        # lisibles (un compteur sur deux) ; celui-là compte des rapports qui n'ont
+        # JAMAIS laissé une seule ligne à lire. « Je n'ai pas su te lire » ne doit
+        # jamais se lire « rien à signaler » -- d'où un compteur séparé plutôt qu'un
+        # 0 silencieux fondu dans les autres champs.
+        "reports_unreadable": reports_unreadable,
+        # Des données, aucun échec, ET rien d'illisible -- ni au niveau de la ligne
+        # (compteur absent, `incomplete_rows`), ni au niveau du RAPPORT ENTIER
+        # (`reports_unreadable`). Le silence n'est pas une preuve — ni au niveau du
+        # domaine (aucun rapport), ni au niveau du champ (un compteur absent dans un
+        # rapport reçu), ni au niveau du rapport (un rapport reçu mais jamais
+        # normalisé). Une seule ligne incomplète, ou un seul rapport illisible,
+        # suffit à refuser : on ne dit « c'est sûr » que si on a réellement TOUT lu.
         #
         # `not failures` en plus : PAS un double comptage (`safe_to_enforce` est un
         # booleen, pas une somme -- le total, lui, continue de venir exclusivement des
@@ -185,8 +243,17 @@ def posture(db, days: int = 30) -> dict:
         # ligne muette n'arrive jamais en base) alors que `failures` decrit des echecs
         # reels : feu vert errone. Ne retire jamais ce garde au nom du "on compte deja
         # les echecs ailleurs" -- ce n'est justement pas la meme chose que compter.
+        #
+        # `reports_unreadable == 0` en plus : le garde ci-dessus voit un rapport
+        # DEGRADE (des lignes en base, mais partiellement lisibles) ; il ne voit PAS
+        # un rapport qui n'a laissé AUCUNE ligne du tout (policy-domain illisible ->
+        # rapport rejeté en bloc avant normalisation). Sans ce second garde, un
+        # rapport entier peut disparaître -- avec ses échecs dedans -- sans que rien
+        # dans `report_row` ne le signale : `sessions_failed`, `incomplete_rows` et
+        # `failures` resteraient tous à leur valeur la plus rassurante.
         "safe_to_enforce": (total > 0 and sessions_failed == 0
-                            and incomplete_rows == 0 and not failures),
+                            and incomplete_rows == 0 and not failures
+                            and reports_unreadable == 0),
         "reporters": sorted(reporters),
     }
 

@@ -74,9 +74,17 @@ def _decompress(raw: bytes) -> bytes:
             # on ne traite pas plutôt que de risquer de mal interpréter le contenu.
             names = [n for n in entries if n.lower().endswith((".xml", ".json"))]
             if not names:
+                # `entries` vient d'une archive HOSTILE, pas d'un contenu qu'on
+                # contrôle : une archive à 50 000 entrées produirait un message de
+                # plusieurs méga-octets, ensuite persisté tel quel dans
+                # `parsing_error.message`. On borne aux 10 premiers noms, avec un
+                # "..." qui dit qu'il y en a d'autres plutôt que de laisser croire
+                # que l'archive n'en contenait que 10.
+                apercu = ", ".join(entries[:10])
+                if len(entries) > 10:
+                    apercu += ", ..."
                 raise ValueError(
-                    "archive zip sans fichier .xml ou .json (contenu : "
-                    f"{', '.join(entries)})")
+                    f"archive zip sans fichier .xml ou .json (contenu : {apercu})")
             name = names[0]
             # On se fie à la taille ANNONCÉE pour rejeter tôt, puis on borne quand même
             # la lecture : un en-tête zip peut mentir.

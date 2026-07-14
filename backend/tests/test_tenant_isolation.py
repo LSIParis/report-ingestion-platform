@@ -89,12 +89,25 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
             "kind": "summary", "report_date": date.today().isoformat(),
             "policy_domain": "tenant-b-test.com",
             "successful_sessions": 100, "failed_sessions": 5}))
+        # Une ligne `failure` aussi -- pas seulement un `summary`. Sans elle, ce test
+        # ne prouvait que la moitie de l'isolation : `sessions_total` (issu des seules
+        # lignes `summary`) pouvait bien rester a 0 chez A pendant qu'une regression
+        # future laisserait fuiter les lignes `failure` de B dans `p["failures"]`,
+        # sans qu'aucun test bloquant ne s'en apercoive.
+        db.add(ReportRow(tenant_id=tid_b, report_id=rep_b.id, data={
+            "kind": "failure", "report_date": date.today().isoformat(),
+            "policy_domain": "tenant-b-test.com",
+            "result_type": "certificate-expired",
+            "sending_mta_ip": "203.0.113.44",
+            "receiving_mx_hostname": "mx.tenant-b-test.com",
+            "failure_sessions": 3}))
         db.commit()
 
     try:
         with tenant_scoped_session(tenant_id=tid_a) as db:  # A lit sa propre posture
             p = posture(db, days=30)
             assert p["sessions_total"] == 0, "A voit des sessions TLS de B"
+            assert p["failures"] == [], "A voit les echecs detailles de B"
     finally:
         with get_session() as db:
             db.query(ReportRow).filter(

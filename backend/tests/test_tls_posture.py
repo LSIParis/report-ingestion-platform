@@ -160,6 +160,72 @@ def test_echecs_sans_summary_bloquent_safe_to_enforce(tenant_tls):
         "feu vert alors que 5 echecs de chiffrement sont en base")
 
 
+def test_rapport_illisible_bloque_safe_to_enforce_et_est_compte(tenant_tls):
+    """LE trou que `posture()` ne voyait pas : un rapport TLS entier peut echouer a se
+    normaliser (`TLSRPT_BAD_POLICY` -> plus de `policy_domain` exploitable ->
+    `TLSRPT_NO_POLICY_DOMAIN` -> `ParseResult(status="failed")`, ZERO ligne) et ne
+    jamais atteindre `report_row`. Un tel rapport n'est pas "rien a signaler" : c'est
+    un point aveugle, et il portait peut-etre des dizaines d'echecs de certificat.
+    Une `posture()` qui ne regarde que `report_row` ne peut pas le voir -- d'ou ce
+    garde sur `Report.status`."""
+    tid, rid = tenant_tls
+    # Un rapport propre (Google), qui arrive normalement en base : sessions_failed
+    # reste a 0 par ce chemin -- le piege ne doit PAS etre visible autrement que par
+    # le nouveau garde.
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    # Le fournisseur B : sa politique entiere a ete rejetee par l'adaptateur avant
+    # meme la normalisation -- Report.status == "failed", AUCUNE ReportRow. Ses 12
+    # `failure-details` (certificate-expired) ne sont nulle part dans `report_row`.
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-illisible-{uuid.uuid4()}",
+                   from_address="noreply@fournisseur-b.example", subject="s",
+                   received_at=datetime.now(timezone.utc),
+                   raw_object_key="raw/y.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id="_default_tlsrpt_json")
+        db.add(rep)
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 1
+    assert p["safe_to_enforce"] is False, (
+        "feu vert alors qu'un rapport TLS entier n'a pas pu etre lu")
+
+
+def test_rapport_illisible_hors_fenetre_nest_pas_compte(tenant_tls):
+    """Le garde regarde la fenetre de temps comme le reste de `posture()` : un rapport
+    illisible vieux de 90 jours ne doit pas empecher indefiniment le passage en
+    enforce -- sans quoi un seul incident ancien bloquerait le tableau de bord a vie."""
+    tid, rid = tenant_tls
+    _seme(tid, rid, {"kind": "summary", "successful_sessions": 1000,
+                     "failed_sessions": 0})
+
+    with get_session() as db:
+        em = Email(tenant_id=tid, message_id=f"tls-vieux-{uuid.uuid4()}",
+                   from_address="noreply@fournisseur-b.example", subject="s",
+                   received_at=datetime.now(timezone.utc) - timedelta(days=90),
+                   raw_object_key="raw/y.eml", status="parsed_ok")
+        db.add(em)
+        db.flush()
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
+                     status="failed", profile_id="_default_tlsrpt_json",
+                     created_at=datetime.now(timezone.utc) - timedelta(days=90))
+        db.add(rep)
+        db.commit()
+
+    with tenant_scoped_session(tenant_id=tid) as db:
+        p = posture(db, days=30)
+
+    assert p["reports_unreadable"] == 0
+    assert p["safe_to_enforce"] is True
+
+
 def test_hors_fenetre_est_ignore(tenant_tls):
     tid, rid = tenant_tls
     _seme(tid, rid, {"kind": "summary", "successful_sessions": 10,

@@ -56,6 +56,27 @@ def test_zip_sans_xml_ni_json_a_un_message_distinct_du_zip_vide():
         decompress(buf.getvalue())
 
 
+def test_message_zip_sans_xml_ni_json_est_borne():
+    # Les noms de fichiers viennent d'une archive HOSTILE, pas d'un contenu qu'on
+    # controle -- et ce message est ensuite persiste tel quel dans
+    # `parsing_error.message`. Une archive a 50 000 entrees produirait un message de
+    # plusieurs megaoctets si on les listait toutes : on borne aux 10 premieres,
+    # puis "...".
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for i in range(15):
+            z.writestr(f"fichier-{i}.txt", "x")
+    with pytest.raises(ValueError) as exc_info:
+        decompress(buf.getvalue())
+    message = str(exc_info.value)
+    for i in range(10):
+        assert f"fichier-{i}.txt" in message
+    for i in range(10, 15):
+        assert f"fichier-{i}.txt" not in message
+    assert "..." in message
+    assert len(message) < 1000
+
+
 def test_bombe_gzip_est_bornee():
     # 200 Mo de zéros compressent en quelques Ko. Sans borne, on les décompresse tous.
     bombe = gzip.compress(b"\0" * (200 * 1024 * 1024))

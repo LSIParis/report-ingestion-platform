@@ -63,12 +63,12 @@ function RowsTable({ reportId }: { reportId: string }) {
   const items = data!.items;
   if (!items.length) return <p className="text-gray-500">Aucune donnée.</p>;
 
-  // L'API renvoie des enveloppes `{ id, report_date, data }` : les clés métier
-  // (source_ip, kind, policy_domain…) vivent dans `data`, jamais à la racine. Sans ce
-  // dépli, isDmarc/isTls valent toujours false et GenericTable affiche
-  // littéralement `[object Object]` — c'était le bug qui rendait DmarcTable et
-  // TlsTable inatteignables.
-  const rows = items.map((r) => r.data as Record<string, unknown>);
+  // L'API renvoie des enveloppes `{ id, report_date, data }` (voir `ReportRowEnvelope`
+  // dans api/reports.ts) : les clés métier (source_ip, kind, policy_domain…) vivent
+  // dans `data`, jamais à la racine. Sans ce dépli, isDmarc/isTls valent toujours false
+  // et GenericTable affiche littéralement `[object Object]` — c'était le bug qui
+  // rendait DmarcTable et TlsTable inatteignables.
+  const rows = items.map((r) => r.data);
 
   // Chaque famille se reconnaît à ses DONNÉES, pas à un nom de profil : `Report` ne
   // stocke pas le format, seulement source_type (attachment/body) et profile_id.

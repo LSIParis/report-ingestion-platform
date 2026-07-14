@@ -203,9 +203,18 @@ export function IpPanel({ ip, onClose }: { ip: string; onClose: () => void }) {
                 nom de serveur MX qui ne correspond pas à la politique publiée.
               </p>
             )}
-            {data.sender ? (
+            {vueUniquementEnTls(data.activity) ? (
+              // `sender.remediation` est TOUJOURS une instruction SPF/DKIM (« Ajoutez
+              // include:... à votre SPF »). Sur une IP vue UNIQUEMENT en TLS, ce
+              // conseil n'a aucun sens : elle ne prétend pas émettre en votre nom, le
+              // paragraphe ci-dessus l'a déjà dit. L'afficher pousserait à élargir un
+              // SPF sans aucune raison, trois lignes après avoir dit que le SPF ne
+              // s'applique pas. Le conseil qui compte ici porte sur le chiffrement
+              // (déjà donné plus haut) : rien à ajouter dans cette section.
+              null
+            ) : data.sender ? (
               <p className="text-sm leading-relaxed">{data.sender.remediation}</p>
-            ) : vueUniquementEnTls(data.activity) ? null : (
+            ) : (
               <p className="text-sm leading-relaxed text-gray-700">
                 Aucun expéditeur connu ne correspond, et votre SPF ne l'autorise pas. Si
                 vous ne reconnaissez pas ce service, il n'y a rien à faire : c'est une
