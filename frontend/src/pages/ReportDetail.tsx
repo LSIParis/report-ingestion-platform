@@ -113,10 +113,14 @@ function Synthese({ r, breakdown }: { r: Report; breakdown?: ReportBreakdown }) 
   );
 }
 
-/* Verdict TLS derive des champs du cycle 1 : sur pour enforce = aucun echec ET total
-   entierement lisible. On ne dit jamais "sur" sur une magnitude partielle/inconnue. */
+/* Verdict TLS derive des champs du cycle 1 : sur pour enforce = volume observe
+   positif, aucun echec, ET total entierement lisible. On ne dit jamais "sur"
+   sur une magnitude partielle/inconnue NI sur zero session observee : le
+   silence n'est pas une preuve de succes (cf. TlsVerdict dans MtaStsPanel).
+   Zero session tombe donc dans la branche non-verte, aux cotes des echecs
+   et des lignes illisibles — aucune de ces situations ne donne de feu vert. */
 function VerdictTls({ r }: { r: Report }) {
-  const sur = r.total_units !== null && !r.units_partial && r.failing_units === 0;
+  const sur = r.total_units !== null && r.total_units > 0 && !r.units_partial && r.failing_units === 0;
   return (
     <div className={`mt-3 rounded border p-3 text-sm ${
       sur ? "border-green-200 bg-green-50 text-green-900"
