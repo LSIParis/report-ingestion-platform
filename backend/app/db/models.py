@@ -184,6 +184,10 @@ class Alert(Base):
     # (voir `reconcile_tenant`).
     opened_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Référence du ticket ouvert pour cette alerte (canal desk365) : posée à l'ouverture,
+    # relue à la fermeture pour ANNOTER le ticket. Nulle si aucun ticket n'a été créé
+    # (alerte non critique, ou canal indisponible à l'ouverture).
+    external_ref: Mapped[str | None] = mapped_column(Text)
 
 
 class AuditLog(Base):
