@@ -33,8 +33,10 @@ log = structlog.get_logger()
 
 TIMEOUT = 15.0
 
-# Meme voix que la page Alertes (frontend/src/pages/Alerts.tsx) : le technicien lit la
-# meme chose dans le ticket et a l'ecran.
+# Vise le meme registre que la page Alertes (frontend/src/pages/Alerts.tsx) : le
+# technicien doit reconnaitre de quoi on parle. Mais ces libelles sont independants de
+# ceux du frontend -- aucune source commune, aucune synchronisation automatique. Si on
+# modifie l'un, penser a verifier l'autre.
 _NATURES = {
     "never_reported": "aucun rapport reçu depuis l'ajout du domaine",
     "domain_silent": "les rapports ont cessé d'arriver",
