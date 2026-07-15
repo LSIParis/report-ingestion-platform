@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import logo from "../assets/logo-lsi.png";
 import { api } from "../api/client";
 import { getClaims, setSession } from "../auth/session";
 import { useTenant } from "../auth/tenant";
@@ -37,7 +38,9 @@ export function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center">
       <form onSubmit={submit} className="bg-white border rounded p-8 w-80 space-y-4">
-        <h1 className="text-lg font-semibold">Connexion</h1>
+        <img src={logo} alt="LSI-Maintenance Mail Dispatch"
+             className="mx-auto w-48 h-auto" />
+        <h1 className="text-lg font-semibold text-center">Connexion</h1>
         <input className="border rounded w-full px-3 py-2" placeholder="Email"
                value={email} onChange={(e) => setEmail(e.target.value)} />
         <input className="border rounded w-full px-3 py-2" type="password" placeholder="Mot de passe"
