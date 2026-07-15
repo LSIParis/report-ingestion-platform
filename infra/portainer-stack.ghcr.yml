@@ -95,6 +95,9 @@ services:
 
   migrate:
     image: ghcr.io/lsiparis/report-api:latest
+    # Force le re-tir de l'image a chaque redeploiement : sinon le webhook reutilise
+    # l'image :latest locale (perimee) -- voir portainer-stack.npm.yml pour le detail.
+    pull_policy: always
     command: alembic upgrade head
     depends_on:
       postgres: { condition: service_healthy }
@@ -103,6 +106,7 @@ services:
 
   api:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     depends_on:
@@ -124,6 +128,7 @@ services:
 
   worker:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: celery -A app.celery_app worker -l info --concurrency 4
     depends_on:
@@ -146,6 +151,7 @@ services:
 
   imap-worker:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: python -m app.workers.imap_worker
     depends_on:
@@ -165,6 +171,7 @@ services:
 
   frontend:
     image: ghcr.io/lsiparis/report-frontend:latest
+    pull_policy: always
     restart: unless-stopped
 
 volumes:

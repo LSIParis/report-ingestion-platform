@@ -99,6 +99,11 @@ services:
 
   migrate:
     image: ghcr.io/lsiparis/report-api:latest
+    # Le webhook de deploiement re-clone `main` et rejoue `docker compose up`, mais ne
+    # re-tire PAS les images :latest -- il reutilise l'image locale (perimee). Sans
+    # `pull_policy: always`, un nouveau code pousse sur :latest mais le conteneur reste
+    # fige sur l'ancien. Force le pull a chaque redeploiement, sur tous les services GHCR.
+    pull_policy: always
     # 1) rôles de connexion (app_api NOBYPASSRLS, app_worker BYPASSRLS)
     # 2) schéma + RLS. Les deux sont idempotents et rejoués à chaque déploiement.
     command: sh -c "python -m scripts.ensure_roles && alembic upgrade head"
@@ -112,6 +117,7 @@ services:
 
   api:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     # L'API rejoint le réseau du proxy pour servir /.well-known/mta-sts.txt : NPM y
@@ -152,6 +158,7 @@ services:
 
   worker:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: celery -A app.celery_app worker -l info --concurrency 4
     # L'image report-api porte un HEALTHCHECK HTTP (GET :8000/health) pense pour l'API.
@@ -196,6 +203,7 @@ services:
   # `domain_silent` et `never_reported` ne se leveraient jamais.
   beat:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     # `/app` appartient a root dans l'image (COPY avant USER appuser) : le conteneur tourne
     # en appuser, qui ne peut pas y ecrire le fichier de planification. `/tmp` est le seul
@@ -212,6 +220,7 @@ services:
 
   imap-worker:
     image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
     restart: unless-stopped
     command: python -m app.workers.imap_worker
     healthcheck: { disable: true }      # releve IMAP, aucun port : voir le worker
@@ -233,6 +242,7 @@ services:
 
   frontend:
     image: ghcr.io/lsiparis/report-frontend:latest
+    pull_policy: always
     restart: unless-stopped
     networks:
       internal:
