@@ -28,11 +28,13 @@ def _client(tenant_id):
 def test_filtre_reporter():
     with get_session() as db:
         t = Tenant(domain=f"rep-{uuid.uuid4().hex[:8]}.test", name="Rep")
-        db.add(t); db.flush()
+        db.add(t)
+        db.flush()
         em = Email(tenant_id=t.id, message_id=f"m-{uuid.uuid4()}", from_address="x@y.test",
                    subject="s", received_at=datetime.now(timezone.utc),
                    raw_object_key="raw/x.eml", status="parsed_ok")
-        db.add(em); db.flush()
+        db.add(em)
+        db.flush()
         for rep_org in ("google.com", "google.com", "microsoft.com"):
             db.add(Report(tenant_id=t.id, email_id=em.id, source_type="body", status="ok",
                           kind="dmarc", reporter=rep_org, total_units=1, failing_units=0,

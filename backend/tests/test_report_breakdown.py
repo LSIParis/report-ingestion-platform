@@ -39,15 +39,18 @@ def _dmarc_row(tid, rid, ip, count, aligned, dkim, spf):
 def _setup_dmarc():
     with get_session() as db:
         t = Tenant(domain=f"brk-{uuid.uuid4().hex[:8]}.test", name="Brk")
-        db.add(t); db.flush()
+        db.add(t)
+        db.flush()
         em = Email(tenant_id=t.id, message_id=f"m-{uuid.uuid4()}", from_address="x@y.test",
                    subject="s", received_at=datetime.now(timezone.utc),
                    raw_object_key="raw/x.eml", status="parsed_ok")
-        db.add(em); db.flush()
+        db.add(em)
+        db.flush()
         rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok",
                      kind="dmarc", reporter="google.com", total_units=610, failing_units=110,
                      units_partial=False)
-        db.add(rep); db.flush()
+        db.add(rep)
+        db.flush()
         # 1.1.1.1 : 400 alignes (dkim pass) + 100 non alignes ; 2.2.2.2 : 110 non alignes.
         db.add_all([
             _dmarc_row(t.id, rep.id, "1.1.1.1", 400, "pass", "pass", "fail"),
@@ -90,15 +93,18 @@ def test_breakdown_dmarc_agrege_par_ip_et_dkim_spf():
 def test_breakdown_tls_domaine_seul():
     with get_session() as db:
         t = Tenant(domain=f"brk-{uuid.uuid4().hex[:8]}.test", name="BrkTls")
-        db.add(t); db.flush()
+        db.add(t)
+        db.flush()
         em = Email(tenant_id=t.id, message_id=f"m-{uuid.uuid4()}", from_address="x@y.test",
                    subject="s", received_at=datetime.now(timezone.utc),
                    raw_object_key="raw/x.eml", status="parsed_ok")
-        db.add(em); db.flush()
+        db.add(em)
+        db.flush()
         rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok",
                      kind="tls", reporter="microsoft.com", total_units=100, failing_units=0,
                      units_partial=False)
-        db.add(rep); db.flush()
+        db.add(rep)
+        db.flush()
         db.add(ReportRow(tenant_id=t.id, report_id=rep.id, report_date=None,
                          data={"kind": "summary", "policy_domain": "exemple.fr",
                                "successful_sessions": 100, "failed_sessions": 0,
@@ -120,11 +126,15 @@ def test_breakdown_autre_tenant_404():
     try:
         with get_session() as db:
             t2 = Tenant(domain=f"brk-{uuid.uuid4().hex[:8]}.test", name="Autre")
-            db.add(t2); db.flush(); other = str(t2.id); db.commit()
+            db.add(t2)
+            db.flush()
+            other = str(t2.id)
+            db.commit()
         # Le client scope sur `other` ne doit PAS voir le rapport de `tid`.
         assert _client(other).get(f"/reports/{rid}/breakdown").status_code == 404
     finally:
         _cleanup(tid)
         if other:
             with get_session() as db:
-                db.query(Tenant).filter_by(id=other).delete(); db.commit()
+                db.query(Tenant).filter_by(id=other).delete()
+                db.commit()
