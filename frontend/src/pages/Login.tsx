@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import logo from "../assets/logo-lsi.png";
+import loginBg from "../assets/login-bg.jpg";
 import { api } from "../api/client";
 import { getClaims, setSession } from "../auth/session";
 import { useTenant } from "../auth/tenant";
@@ -36,11 +37,16 @@ export function Login() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <form onSubmit={submit} className="bg-white border rounded p-8 w-80 space-y-4">
-        <img src={logo} alt="LSI-Maintenance Mail Dispatch"
-             className="mx-auto w-48 h-auto" />
-        <h1 className="text-lg font-semibold text-center">Connexion</h1>
+    <div
+      className="min-h-screen flex flex-col items-center justify-center gap-4 bg-slate-800 bg-cover bg-center p-4"
+      style={{ backgroundImage: `url(${loginBg})` }}
+    >
+      <form
+        onSubmit={submit}
+        className="w-80 space-y-4 rounded border bg-white/90 p-8 shadow-xl backdrop-blur"
+      >
+        <img src={logo} alt="LSI-Maintenance Mail Dispatch" className="mx-auto w-48 h-auto" />
+        <h1 className="text-center text-lg font-semibold">Connexion</h1>
         <input className="border rounded w-full px-3 py-2" placeholder="Email"
                value={email} onChange={(e) => setEmail(e.target.value)} />
         <input className="border rounded w-full px-3 py-2" type="password" placeholder="Mot de passe"
@@ -48,6 +54,9 @@ export function Login() {
         {error && <p className="text-red-600 text-sm">{error}</p>}
         <button className="bg-blue-600 text-white rounded w-full py-2">Se connecter</button>
       </form>
+      <p className="text-xs text-white/80">
+        © LSI-Maintenance {new Date().getFullYear()}
+      </p>
     </div>
   );
 }
