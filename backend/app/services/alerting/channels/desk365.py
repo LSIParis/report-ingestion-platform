@@ -89,7 +89,8 @@ def _call(method: str, path: str, body: dict) -> dict:
 def _creer_ticket(alert, tenant) -> str:
     """Crée le ticket, renvoie son numéro. Lève si la réponse n'est pas exploitable."""
     body = {
-        "contact_email": settings.desk365_requester_email,
+        "email": settings.desk365_requester_email,
+        "status": settings.desk365_status,
         "subject": _sujet(alert, tenant),
         "description": _description(alert, tenant),
         "group": settings.desk365_group,
@@ -108,10 +109,11 @@ def _creer_ticket(alert, tenant) -> str:
 
 def _ajouter_note(ticket_ref: str, alert) -> None:
     quand = (alert.closed_at or datetime.now(timezone.utc)).isoformat()
-    _call("POST", "tickets/add_note", {
-        "ticket_number": ticket_ref,
+    # ticket_number est un PARAMETRE DE REQUETE dans l'URL, pas un champ du corps JSON
+    # (confirme reel : le mettre dans le corps donne 405).
+    _call("POST", f"tickets/add_note?ticket_number={ticket_ref}", {
         "body": f"Condition résolue le {quand}. Vérifiez puis clôturez ce ticket.",
-        "private": True,
+        "private_note": 1,
     })
 
 

@@ -55,7 +55,8 @@ def test_ouverture_critique_cree_un_ticket_et_pose_external_ref(monkeypatch):
     assert a.external_ref == "TCK-777"
     method, path, body = calls[0]
     assert method == "POST" and "create" in path
-    assert body["contact_email"] == "alerte_dmarc@lsiparis.tech"
+    assert body["email"] == "alerte_dmarc@lsiparis.tech"
+    assert body["status"] == "Open"
     assert body["group"] == "Support informatique"
     assert body["priority"] == 20
     assert body["category"] == "Réseau"
@@ -85,11 +86,10 @@ def test_fermeture_avec_ticket_ajoute_une_note(monkeypatch):
 
     assert envoye is True
     method, path, body = calls[0]
-    assert method == "POST" and "note" in path.lower()
-    assert "TCK-777" in str(body.values())    # le ticket est reference
-    # on annote, on ne cloture pas : aucun changement de statut demande, juste une note
-    joint = " ".join(str(v) for v in body.values())
-    assert "résolue" in joint and "clôturez" in joint
+    assert method == "POST" and "add_note" in path
+    assert "TCK-777" in path                  # le ticket est un PARAMETRE DE REQUETE, pas un champ
+    assert "résolue" in body["body"] and "clôturez" in body["body"]
+    assert body["private_note"] == 1
 
 
 def test_fermeture_sans_ticket_ne_fait_rien(monkeypatch):

@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     desk365_priority: int = 20               # 20 = Urgent (bareme Desk365)
     desk365_category: str = "Réseau"
     desk365_subcategory: str = "Déliverabilité emails"
+    # Statut REQUIS par l'API Desk365 a la creation (confirme reel : 400 "missing field
+    # Status" sinon).
+    desk365_status: str = "Open"
 
     def model_post_init(self, __context) -> None:
         """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""
