@@ -49,7 +49,7 @@ def _rapport(tid: str, *, il_y_a_jours: int, profil: str = "_default_dmarc_xml")
         db.add(em)
         db.flush()
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     profile_id=profil, status="ok", created_at=quand)
+                     profile_id=profil, status="ok", created_at=quand, kind="dmarc")
         db.add(rep)
         db.flush()
         rid = str(rep.id)

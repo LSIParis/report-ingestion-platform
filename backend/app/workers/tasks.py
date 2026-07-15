@@ -426,8 +426,11 @@ def _record_parsing_failure(*, email_id: str, tenant_id: str, filename: str,
                          object_key=object_key, size_bytes=size_bytes)
         db.add(att)
         db.flush()
+        # PJ illisible/infectee : aucune ligne exploitee, le type reel est donc inconnu.
+        # On retient "dmarc" par defaut, coherent avec summarize([]) qui infere "dmarc"
+        # en l'absence de toute ligne (cf. _infer_kind : absence de cle "kind" => DMARC).
         rep = Report(tenant_id=tenant_id, email_id=email_id, attachment_id=att.id,
-                     source_type="attachment", status="failed", row_count=0)
+                     source_type="attachment", status="failed", row_count=0, kind="dmarc")
         db.add(rep)
         db.flush()
         db.add(ParsingError(tenant_id=tenant_id, email_id=email_id, report_id=rep.id,

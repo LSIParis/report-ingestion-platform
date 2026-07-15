@@ -38,7 +38,7 @@ def seed_two_tenants():
             db.add(em)
             db.flush()
 
-            rep = Report(tenant_id=t.id, email_id=em.id, source_type="body", status="ok")
+            rep = Report(tenant_id=t.id, email_id=em.id, source_type="body", status="ok", kind="dmarc")
             db.add(rep)
             db.flush()
 

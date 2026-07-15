@@ -31,7 +31,7 @@ def tenant_avec_ligne_dmarc():
                    raw_object_key="raw/t.eml", status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok", kind="dmarc")
         db.add(rep)
         db.flush()
         db.add(ReportRow(tenant_id=t.id, report_id=rep.id, data={
