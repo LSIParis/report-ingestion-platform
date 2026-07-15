@@ -1,5 +1,6 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
 
+import logo from "../assets/logo-lsi.png";
 import { useMe } from "../api/account";
 import { isAdmin } from "../auth/session";
 import { useTenant } from "../auth/tenant";
@@ -11,7 +12,9 @@ export function Layout() {
   return (
     <div className="flex min-h-screen">
       <nav className="w-56 shrink-0 border-r bg-white p-4">
-        <h2 className="mb-4 font-semibold">DMARC</h2>
+        <Link to="/" className="block" title="LSI-Maintenance Mail Dispatch">
+          <img src={logo} alt="LSI-Maintenance Mail Dispatch" className="mb-4 w-full h-auto" />
+        </Link>
         <div className="space-y-1">
           <NavLink to="/">Vue d'ensemble</NavLink>
           <NavLink to="/reports">Rapports</NavLink>
