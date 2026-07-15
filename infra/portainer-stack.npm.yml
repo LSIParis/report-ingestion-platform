@@ -183,6 +183,12 @@ services:
       ALERT_SILENCE_DAYS: ${ALERT_SILENCE_DAYS:-4}
       ALERT_ONBOARDING_GRACE_DAYS: ${ALERT_ONBOARDING_GRACE_DAYS:-7}
       ALERT_TLS_WINDOW_DAYS: ${ALERT_TLS_WINDOW_DAYS:-7}
+      # Canal d'alerte : "desk365" cree un ticket helpdesk au lieu de poster un webhook.
+      ALERT_CHANNEL: ${ALERT_CHANNEL:-webhook}
+      # La cle API Desk365 est un SECRET (variable d'environnement de la stack, jamais
+      # committee). Les autres parametres ont des defauts (voir app/config.py).
+      DESK365_API_KEY: ${DESK365_API_KEY:-}
+      DESK365_BASE_URL: ${DESK365_BASE_URL:-https://lsi-maintenance.desk365.io/apis/v3}
 
   # Ordonnanceur des alertes. INDISPENSABLE : un domaine silencieux (ou qui n'a jamais
   # rapporte) ne produit AUCUN evenement -- on ne peut pas reagir a ce qui n'arrive pas.
