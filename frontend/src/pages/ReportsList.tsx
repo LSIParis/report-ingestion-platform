@@ -129,9 +129,13 @@ function fmtVolume(r: Report): string {
   return r.units_partial ? `au moins ${n}` : n;
 }
 
-/* Taux d'echec : « — » si le total est inconnu ou nul (pas de « 0 % » rassurant et faux). */
+/* Taux d'echec : « — » si le total est inconnu ou nul (pas de « 0 % » rassurant et faux).
+   Si le total n'est qu'un minorant (units_partial), le taux exact est inconnu : des lignes
+   illisibles ont ete ignorees, donc total/failing sous-estiment peut-etre le vrai echec.
+   On ne l'affiche pas plutot que d'afficher un pourcentage defini mais faux. Meme discipline
+   que fmtVolume (« au moins »), coherente avec l'invariant « null ≠ 0 ». */
 function fmtRate(r: Report): string {
-  if (r.total_units === null || r.total_units === 0) return "—";
+  if (r.total_units === null || r.total_units === 0 || r.units_partial) return "—";
   const pct = Math.round((100 * (r.failing_units ?? 0)) / r.total_units);
   return `${pct} % en échec`;
 }
