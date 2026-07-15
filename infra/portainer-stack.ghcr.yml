@@ -149,6 +149,27 @@ services:
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
 
+  # Ordonnanceur des alertes. INDISPENSABLE : un domaine silencieux (ou qui n'a jamais
+  # rapporte) ne produit AUCUN evenement -- sans ce service, `domain_silent` et
+  # `never_reported` ne se leveraient jamais (seules les alertes TLS, declenchees a
+  # l'ingestion, fonctionneraient). Beat n'enfile que des taches (broker Redis) ; le
+  # travail avec acces DB tourne sur le worker.
+  beat:
+    image: ghcr.io/lsiparis/report-api:latest
+    pull_policy: always
+    restart: unless-stopped
+    # `/app` appartient a root dans l'image (COPY avant USER appuser) : le conteneur tourne
+    # en appuser, qui ne peut y ecrire le fichier de planification. `/tmp` est le seul
+    # repertoire inscriptible -- Beat n'a besoin d'aucune persistance (le planning est
+    # declare dans le code, pas lu depuis ce fichier).
+    command: celery -A app.celery_app beat -l info -s /tmp/celerybeat-schedule
+    healthcheck: { disable: true }      # ordonnanceur, aucun port : voir le worker
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
   imap-worker:
     image: ghcr.io/lsiparis/report-api:latest
     pull_policy: always
