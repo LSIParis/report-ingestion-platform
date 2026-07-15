@@ -17,6 +17,9 @@ app.include_router(ingest.router)     # /ingest/ses — public, sécurisé par s
 app.include_router(mta_sts.router)    # /.well-known/mta-sts.txt — public (lu par les MTA)
 
 
+# Sonde de vivacité : le HEALTHCHECK de l'image (voir backend/Dockerfile) interroge cet
+# endpoint. Seul le service `api` sert du HTTP ; worker/beat/imap-worker desactivent donc
+# cette sonde (ils n'ecoutent sur aucun port).
 @app.get("/health")
 def health():
     return {"status": "ok"}
