@@ -1,17 +1,25 @@
+import { useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
+import logo from "../assets/logo-lsi.png";
 import { useMe } from "../api/account";
 import { isAdmin } from "../auth/session";
 import { useTenant } from "../auth/tenant";
+import { useIdleLogout } from "../auth/useIdleLogout";
 import { AccountMenu } from "./AccountMenu";
+import { About } from "./About";
 
 export function Layout() {
+  useIdleLogout();
   const admin = isAdmin();
+  const [apropos, setApropos] = useState(false);
 
   return (
     <div className="flex min-h-screen">
-      <nav className="w-56 shrink-0 border-r bg-white p-4">
-        <h2 className="mb-4 font-semibold">DMARC</h2>
+      <nav className="flex w-56 shrink-0 flex-col border-r bg-white p-4">
+        <Link to="/" className="block" title="LSI-Maintenance Mail Dispatch">
+          <img src={logo} alt="LSI-Maintenance Mail Dispatch" className="mb-4 w-full h-auto" />
+        </Link>
         <div className="space-y-1">
           <NavLink to="/">Vue d'ensemble</NavLink>
           <NavLink to="/reports">Rapports</NavLink>
@@ -22,6 +30,12 @@ export function Layout() {
           {admin && <NavLink to="/alerts">Alertes</NavLink>}
           {admin && <NavLink to="/settings">Paramètres</NavLink>}
         </div>
+        <button
+          onClick={() => setApropos(true)}
+          className="mt-auto pt-4 text-left text-sm text-gray-500 hover:text-gray-900"
+        >
+          À propos
+        </button>
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -37,6 +51,8 @@ export function Layout() {
           <Outlet />
         </main>
       </div>
+
+      {apropos && <About onClose={() => setApropos(false)} />}
     </div>
   );
 }
