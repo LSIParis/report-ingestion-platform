@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Text, func,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Text, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -104,6 +104,17 @@ class Report(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Resume denormalise (voir app/persistence/summary.py) : rempli a l'ingestion et
+    # backfille par la migration 0010. Evite d'agreger les lignes a chaque affichage de
+    # liste et rend le filtre par type trivial.
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    reporter: Mapped[str | None] = mapped_column(Text)
+    total_units: Mapped[int | None] = mapped_column(Integer)
+    failing_units: Mapped[int | None] = mapped_column(Integer)
+    units_partial: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    period_start: Mapped[date | None] = mapped_column(Date)
+    period_end: Mapped[date | None] = mapped_column(Date)
 
 
 class ReportRow(Base):
