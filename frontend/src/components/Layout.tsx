@@ -4,9 +4,11 @@ import logo from "../assets/logo-lsi.png";
 import { useMe } from "../api/account";
 import { isAdmin } from "../auth/session";
 import { useTenant } from "../auth/tenant";
+import { useIdleLogout } from "../auth/useIdleLogout";
 import { AccountMenu } from "./AccountMenu";
 
 export function Layout() {
+  useIdleLogout();
   const admin = isAdmin();
 
   return (
