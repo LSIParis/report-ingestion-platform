@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import { IDLE_LIMIT_MS, estInactif } from "./idle";
 import { clearSession } from "./session";
+import { useTenant } from "./tenant";
 
 const CLE = "last_activity";
 const CONTROLE_MS = 30_000;        // frequence du controle periodique
@@ -35,6 +36,7 @@ function dernier(): number {
 /** Deconnecte apres IDLE_MINUTES sans activite. A monter dans la coquille authentifiee. */
 export function useIdleLogout(): void {
   const nav = useNavigate();
+  const { setTenant } = useTenant();
 
   useEffect(() => {
     marquer();      // on repart d'une activite fraiche a l'entree
@@ -52,6 +54,9 @@ export function useIdleLogout(): void {
     const deconnecterSiInactif = () => {
       if (estInactif(dernier(), Date.now(), IDLE_LIMIT_MS)) {
         clearSession();
+        // Comme la deconnexion manuelle : on repart d'un QueryClient neuf (App.tsx)
+        // pour qu'aucune donnee du tenant precedent ne survive en cache.
+        setTenant(null);
         nav("/login", { replace: true });
       }
     };
@@ -67,5 +72,5 @@ export function useIdleLogout(): void {
       document.removeEventListener("visibilitychange", deconnecterSiInactif);
       window.clearInterval(minuteur);
     };
-  }, [nav]);
+  }, [nav, setTenant]);
 }
