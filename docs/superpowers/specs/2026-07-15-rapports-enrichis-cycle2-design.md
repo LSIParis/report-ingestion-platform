@@ -70,9 +70,11 @@ Un bandeau **kind-aware** remplace l'en-tête minimal actuel. Il combine deux so
   du cycle 1), domaine.
 - **DMARC** : deux barres — **DKIM aligné** et **SPF aligné** (`dkim_aligned`/`spf_aligned`
   rapportés au volume) — pour voir lequel réparer.
-- **TLS** : un **verdict** dérivé de `ReportOut` — `failing_units == 0 && !units_partial && total_units !== null`
+- **TLS** : un **verdict** dérivé de `ReportOut` — `total_units !== null && total_units > 0 && !units_partial && failing_units == 0`
   ⇒ « chiffrement vérifié, sûr de passer en enforce » (vert) ; sinon « des sessions échouent
-  ou sont illisibles — à corriger avant d'appliquer » (rouge/orange).
+  ou sont illisibles — à corriger avant d'appliquer » (rouge/orange). Le garde `total_units > 0`
+  est essentiel : zéro session observée n'est PAS une preuve de succès (silence ≠ sûreté,
+  même doctrine que `MtaStsPanel.TlsVerdict`).
 - **Émetteur cliquable** → navigue vers `/reports?reporter=<émetteur>`.
 - **Domaine cliquable — admin uniquement** (`isAdmin()`) → ouvre le `MtaStsPanel` existant
   (`{ tenantId: tenant actif, domain: policy_domain, onClose }`). Le panneau et son endpoint

@@ -1,20 +1,27 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import {
   type ParsingError,
+  type Report,
+  type ReportBreakdown,
   useReport,
+  useReportBreakdown,
   useReportErrors,
   useReportRows,
   useReprocess,
 } from "../api/reports";
+import { isAdmin } from "../auth/session";
+import { useTenant } from "../auth/tenant";
 import { IpPanel } from "../components/IpPanel";
+import { MtaStsPanel } from "../components/MtaStsPanel";
 import { StatusBadge } from "../components/StatusBadge";
 
 export function ReportDetail() {
   const { id } = useParams<{ id: string }>();
   const [tab, setTab] = useState<"data" | "errors">("data");
   const report = useReport(id!);
+  const breakdown = useReportBreakdown(id!);
   const errors = useReportErrors(id!);
   const reprocess = useReprocess();
 
@@ -23,17 +30,13 @@ export function ReportDetail() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="text-xl font-semibold">Rapport {r.id.slice(0, 8)}</h1>
-          <p className="text-sm text-gray-500">
-            {r.source_type} · {r.row_count} lignes · <StatusBadge status={r.status} />
-          </p>
-        </div>
+      <Synthese r={r} breakdown={breakdown.data} />
+
+      <div className="mb-4 flex justify-end">
         <button
           onClick={() => reprocess.mutate(r.id)}
           disabled={reprocess.isPending}
-          className="bg-blue-600 text-white rounded px-3 py-1 disabled:opacity-40"
+          className="rounded bg-blue-600 px-3 py-1 text-white disabled:opacity-40"
         >
           {reprocess.isPending ? "…" : "Rejouer le parsing"}
         </button>
@@ -50,40 +53,159 @@ export function ReportDetail() {
         </button>
       </div>
 
-      {tab === "data" ? <RowsTable reportId={r.id} /> : <ErrorsList errors={errors.data ?? []} />}
+      {tab === "data"
+        ? <DataView r={r} breakdown={breakdown.data} loading={breakdown.isLoading} />
+        : <ErrorsList errors={errors.data ?? []} />}
     </div>
   );
 }
 
-function RowsTable({ reportId }: { reportId: string }) {
+/* Bandeau de synthese : l'essentiel du rapport sans lire les lignes. Kind-aware. */
+function Synthese({ r, breakdown }: { r: Report; breakdown?: ReportBreakdown }) {
+  const { tenant } = useTenant();
+  const [mtaSts, setMtaSts] = useState(false);
+  const domain = breakdown?.policy_domain ?? null;
+  // Le lien domaine -> MtaStsPanel exige un composant admin ET un tenant concret.
+  const domaineCliquable = domain != null && isAdmin() && tenant != null;
+
+  return (
+    <div className="mb-4 rounded border bg-white p-4">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <TypeBadge kind={r.kind} />
+        <h1 className="text-lg font-semibold">{r.id.slice(0, 8)}</h1>
+        <StatusBadge status={r.status} />
+      </div>
+
+      <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+        <Fait label="Émetteur">
+          <Link to={`/reports?reporter=${encodeURIComponent(r.reporter ?? "")}`}
+                className="text-blue-600 hover:underline">
+            {r.reporter ?? "—"}
+          </Link>
+        </Fait>
+        <Fait label="Domaine">
+          {domaineCliquable ? (
+            <button onClick={() => setMtaSts(true)} className="text-blue-600 hover:underline">
+              {domain}
+            </button>
+          ) : (domain ?? "—")}
+        </Fait>
+        <Fait label="Période">
+          {r.period_start ?? "?"} → {r.period_end ?? "?"}
+        </Fait>
+        <Fait label="Volume">{fmtVolume(r)}</Fait>
+        <Fait label="Taux d'échec">{fmtRate(r)}</Fait>
+      </dl>
+
+      {r.kind === "dmarc" && breakdown && r.total_units !== null && (
+        <div className="mt-3 space-y-2">
+          <Barre label="DKIM aligné" value={breakdown.dkim_aligned ?? 0} total={r.total_units} />
+          <Barre label="SPF aligné" value={breakdown.spf_aligned ?? 0} total={r.total_units} />
+        </div>
+      )}
+
+      {r.kind === "tls" && <VerdictTls r={r} />}
+
+      {mtaSts && tenant && domain && (
+        <MtaStsPanel tenantId={tenant} domain={domain} onClose={() => setMtaSts(false)} />
+      )}
+    </div>
+  );
+}
+
+/* Verdict TLS derive des champs du cycle 1 : sur pour enforce = volume observe
+   positif, aucun echec, ET total entierement lisible. On ne dit jamais "sur"
+   sur une magnitude partielle/inconnue NI sur zero session observee : le
+   silence n'est pas une preuve de succes (cf. TlsVerdict dans MtaStsPanel).
+   Zero session tombe donc dans la branche non-verte, aux cotes des echecs
+   et des lignes illisibles — aucune de ces situations ne donne de feu vert. */
+function VerdictTls({ r }: { r: Report }) {
+  const sur = r.total_units !== null && r.total_units > 0 && !r.units_partial && r.failing_units === 0;
+  return (
+    <div className={`mt-3 rounded border p-3 text-sm ${
+      sur ? "border-green-200 bg-green-50 text-green-900"
+          : "border-red-200 bg-red-50 text-red-900"}`}>
+      {sur
+        ? "Chiffrement vérifié : sûr de passer en application (enforce)."
+        : "Des sessions échouent ou sont illisibles — à corriger avant d'appliquer."}
+    </div>
+  );
+}
+
+function DataView({ r, breakdown, loading }:
+    { r: Report; breakdown?: ReportBreakdown; loading: boolean }) {
+  // DMARC : vue groupee par IP (breakdown). TLS/generique : rendu ligne a ligne existant.
+  // Chaque branche gere son propre etat `ip`/`IpPanel` (branches mutuellement exclusives).
+  if (r.kind === "dmarc") {
+    return <DmarcSources sources={breakdown?.sources ?? []} loading={loading} />;
+  }
+  return <RowsLegacy reportId={r.id} />;
+}
+
+function DmarcSources({ sources, loading }:
+    { sources: NonNullable<ReportBreakdown["sources"]>; loading: boolean }) {
+  const [ip, setIp] = useState<string | null>(null);
+  if (loading) return <p>Chargement…</p>;
+  if (!sources.length) return <p className="text-gray-500">Aucune source.</p>;
+  return (
+    <>
+      <SourcesTable sources={sources} onSelectIp={setIp} />
+      {ip && <IpPanel ip={ip} onClose={() => setIp(null)} />}
+    </>
+  );
+}
+
+/* Vue groupee par IP (DMARC) : une ligne par IP source, coherente avec le tableau
+   Sources de la Vue d'ensemble. L'IP est le point d'entree de l'enquete -> cliquable. */
+function SourcesTable({ sources, onSelectIp }:
+    { sources: NonNullable<ReportBreakdown["sources"]>; onSelectIp: (ip: string) => void }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="border-b text-left text-gray-500">
+          <tr>
+            <th className="py-2 pr-4">IP source</th>
+            <th className="py-2 pr-4 text-right">Messages</th>
+            <th className="py-2 pr-4 text-right">Conformes</th>
+            <th className="py-2 pr-4 text-right">En échec</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sources.map((s) => (
+            <tr key={s.source_ip} className="border-b">
+              <td className="py-1 pr-4">
+                <button onClick={() => onSelectIp(s.source_ip)}
+                        className="font-mono text-blue-600 hover:underline">
+                  {s.source_ip}
+                </button>
+              </td>
+              <td className="py-1 pr-4 text-right tabular-nums">{s.messages}</td>
+              <td className="py-1 pr-4 text-right tabular-nums text-green-700">{s.compliant}</td>
+              <td className="py-1 pr-4 text-right tabular-nums text-red-700">
+                {s.failing || "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* TLS et generique : rendu ligne a ligne (inchange). La branche DMARC de l'ancien
+   RowsTable a disparu -- DMARC passe par DmarcSources. */
+function RowsLegacy({ reportId }: { reportId: string }) {
   const [page, setPage] = useState(1);
   const [ip, setIp] = useState<string | null>(null);
   const { data, isLoading } = useReportRows(reportId, page);
   if (isLoading) return <p>Chargement…</p>;
   const items = data!.items;
   if (!items.length) return <p className="text-gray-500">Aucune donnée.</p>;
-
-  // L'API renvoie des enveloppes `{ id, report_date, data }` (voir `ReportRowEnvelope`
-  // dans api/reports.ts) : les clés métier (source_ip, kind, policy_domain…) vivent
-  // dans `data`, jamais à la racine. Sans ce dépli, isDmarc/isTls valent toujours false
-  // et GenericTable affiche littéralement `[object Object]` — c'était le bug qui
-  // rendait DmarcTable et TlsTable inatteignables.
   const rows = items.map((r) => r.data);
-
-  // Chaque famille se reconnaît à ses DONNÉES, pas à un nom de profil : `Report` ne
-  // stocke pas le format, seulement source_type (attachment/body) et profile_id.
-  const isDmarc = "source_ip" in rows[0];
   const isTls = "kind" in rows[0] && "policy_domain" in rows[0];
-
   return (
     <>
-      {isDmarc ? (
-        <DmarcTable rows={rows} onSelectIp={setIp} />
-      ) : isTls ? (
-        <TlsTable rows={rows} onSelectIp={setIp} />
-      ) : (
-        <GenericTable rows={rows} />
-      )}
+      {isTls ? <TlsTable rows={rows} onSelectIp={setIp} /> : <GenericTable rows={rows} />}
       <div className="flex gap-2 mt-4 items-center">
         <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="disabled:opacity-40">←</button>
         <span className="text-sm">Page {page} · {data?.total} lignes</span>
@@ -91,61 +213,6 @@ function RowsTable({ reportId }: { reportId: string }) {
       </div>
       {ip && <IpPanel ip={ip} onClose={() => setIp(null)} />}
     </>
-  );
-}
-
-/** Les lignes DMARC méritent mieux qu'un vidage de JSON : ce sont elles qu'on lit pour
- *  décider. L'IP est le seul point d'entrée de l'enquête — donc elle est cliquable. */
-function DmarcTable({
-  rows,
-  onSelectIp,
-}: {
-  rows: Record<string, unknown>[];
-  onSelectIp: (ip: string) => void;
-}) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="text-left text-gray-500 border-b">
-          <tr>
-            <th className="py-2 pr-4">IP source</th>
-            <th className="py-2 pr-4">Messages</th>
-            <th className="py-2 pr-4">Alignement</th>
-            <th className="py-2 pr-4">Traitement</th>
-            <th className="py-2 pr-4">SPF / DKIM</th>
-            <th className="py-2 pr-4">De</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => {
-            const aligned = String(row.aligned ?? "");
-            return (
-              <tr key={i} className="border-b">
-                <td className="py-1 pr-4">
-                  <button
-                    onClick={() => onSelectIp(String(row.source_ip))}
-                    className="font-mono text-blue-600 hover:underline"
-                  >
-                    {String(row.source_ip)}
-                  </button>
-                </td>
-                <td className="py-1 pr-4">{String(row.message_count ?? "—")}</td>
-                <td className="py-1 pr-4">
-                  <span className={aligned === "pass" ? "text-green-700" : "text-red-700"}>
-                    {aligned || "—"}
-                  </span>
-                </td>
-                <td className="py-1 pr-4">{String(row.disposition ?? "—")}</td>
-                <td className="py-1 pr-4 text-gray-500">
-                  {String(row.spf ?? "—")} / {String(row.dkim ?? "—")}
-                </td>
-                <td className="py-1 pr-4">{String(row.header_from ?? "—")}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
   );
 }
 
@@ -288,4 +355,52 @@ function ErrorsList({ errors }: { errors: ParsingError[] }) {
       </tbody>
     </table>
   );
+}
+
+function TypeBadge({ kind }: { kind: Report["kind"] }) {
+  const tls = kind === "tls";
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-xs ${
+      tls ? "bg-purple-100 text-purple-800" : "bg-blue-100 text-blue-800"}`}>
+      {tls ? "TLS" : "DMARC"}
+    </span>
+  );
+}
+
+function Fait({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="text-gray-500">{label}</dt>
+      <dd className="min-w-0 break-words font-medium">{children}</dd>
+    </div>
+  );
+}
+
+function Barre({ label, value, total }: { label: string; value: number; total: number }) {
+  const pct = total ? Math.round((100 * value) / total) : 0;
+  return (
+    <div>
+      <div className="flex justify-between text-xs text-gray-600">
+        <span>{label}</span>
+        <span className="tabular-nums">{total ? `${pct} %` : "—"}</span>
+      </div>
+      <div className="mt-1 h-1.5 rounded bg-gray-100">
+        <div className="h-1.5 rounded bg-emerald-500" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/* Convention du cycle 1 : « — » si le total est illisible (jamais « 0 »/« 0 % ») ;
+   « au moins N » si le total n'est qu'un minorant. */
+function fmtVolume(r: Report): string {
+  if (r.total_units === null) return "—";
+  const n = r.total_units.toLocaleString("fr-FR");
+  return r.units_partial ? `au moins ${n}` : n;
+}
+
+function fmtRate(r: Report): string {
+  if (r.total_units === null || r.total_units === 0 || r.units_partial) return "—";
+  const pct = Math.round((100 * (r.failing_units ?? 0)) / r.total_units);
+  return `${pct} % en échec`;
 }

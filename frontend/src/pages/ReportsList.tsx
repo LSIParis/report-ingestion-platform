@@ -14,6 +14,7 @@ export function ReportsList() {
   const status = sp.get("status") ?? "";
   const brand = sp.get("brand") ?? "";
   const kind = sp.get("kind") ?? "";
+  const reporter = sp.get("reporter") ?? "";
   const page = Number(sp.get("page") ?? 1);
 
   const set = (k: string, v: string) => {
@@ -23,7 +24,7 @@ export function ReportsList() {
     setSp(n);
   };
 
-  const { data, isLoading } = useReports({ status, brand, kind, page });
+  const { data, isLoading } = useReports({ status, brand, kind, reporter, page });
 
   return (
     <div className="p-6">
@@ -45,6 +46,18 @@ export function ReportsList() {
           </button>
         ))}
       </div>
+
+      {reporter && (
+        <div className="mb-3">
+          <button
+            onClick={() => set("reporter", "")}
+            className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-800 hover:bg-blue-100"
+          >
+            Émetteur : {reporter}
+            <span aria-hidden className="text-blue-500">✕</span>
+          </button>
+        </div>
+      )}
 
       <div className="flex gap-3 mb-4">
         <select value={status} onChange={(e) => set("status", e.target.value)}

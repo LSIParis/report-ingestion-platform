@@ -1,5 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 
+from app.api.metrics import (
+    _aligned, _dkim, _est_une_ligne_dmarc, _msgs, _msgs_where, _source_ip, _spf,
+)
 from app.api.pagination import Page, page_params, paginate
 from app.api.schemas import ParsingErrorOut, ReportOut, ReportRowOut
 from app.auth.deps import get_db, get_tenant_ctx
@@ -15,13 +19,15 @@ store = ObjectStore.from_settings(settings)
 
 @router.get("", response_model=Page[ReportOut])
 def list_reports(status_f: str | None = None, brand: str | None = None,
-                 kind: str | None = None,
+                 kind: str | None = None, reporter: str | None = None,
                  db=Depends(get_db), pg=Depends(page_params)):
     q = db.query(Report)
     if status_f:
         q = q.filter(Report.status == status_f)
     if kind:
         q = q.filter(Report.kind == kind)
+    if reporter:
+        q = q.filter(Report.reporter == reporter)
     if brand:
         q = q.join(Email, Email.id == Report.email_id)\
              .filter(Email.from_address.ilike(f"%{brand}%"))
@@ -34,6 +40,47 @@ def get_report(report_id: str, db=Depends(get_db)):
     if not r:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Rapport introuvable")
     return r
+
+
+@router.get("/{report_id}/breakdown")
+def get_report_breakdown(report_id: str, db=Depends(get_db)):
+    """Analyse d'un rapport pour le bandeau et la vue groupee. Kind-aware.
+
+    Tout passe par la session scopee (RLS) : un rapport d'un autre tenant -> 404 (via
+    db.get qui ne le voit pas), jamais 403. Les casts JSONB sont ceux de metrics.py,
+    ici FILTRES sur ce report_id.
+    """
+    r = db.get(Report, report_id)
+    if not r:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rapport introuvable")
+
+    # policy_domain : uniforme sur le rapport, lu sur la premiere ligne qui le porte.
+    domain = (db.query(ReportRow.data["policy_domain"].astext)
+                .filter(ReportRow.report_id == report_id,
+                        ReportRow.data["policy_domain"].astext.isnot(None))
+                .limit(1).scalar())
+    out: dict = {"policy_domain": domain}
+
+    if r.kind == "dmarc":
+        agg = (db.query(
+                   _msgs_where(_dkim == "pass").label("dkim_aligned"),
+                   _msgs_where(_spf == "pass").label("spf_aligned"))
+               .filter(ReportRow.report_id == report_id, _est_une_ligne_dmarc)
+               .one())
+        sources = (db.query(
+                       _source_ip.label("ip"),
+                       func.coalesce(func.sum(_msgs), 0).label("messages"),
+                       _msgs_where(_aligned == "pass").label("compliant"))
+                   .filter(ReportRow.report_id == report_id, _est_une_ligne_dmarc)
+                   .group_by(_source_ip)
+                   .order_by(func.coalesce(func.sum(_msgs), 0).desc())
+                   .all())
+        out["dkim_aligned"] = int(agg.dkim_aligned)
+        out["spf_aligned"] = int(agg.spf_aligned)
+        out["sources"] = [{"source_ip": ip, "messages": int(m),
+                           "compliant": int(c), "failing": int(m) - int(c)}
+                          for ip, m, c in sources]
+    return out
 
 
 @router.get("/{report_id}/rows", response_model=Page[ReportRowOut])

@@ -50,11 +50,28 @@ export interface ReportRowEnvelope {
   data: Record<string, unknown>;
 }
 
-export function useReports(filters: { status?: string; brand?: string; kind?: string; page: number }) {
+export interface ReportSource {
+  source_ip: string;
+  messages: number;
+  compliant: number;
+  failing: number;
+}
+
+export interface ReportBreakdown {
+  policy_domain: string | null;
+  dkim_aligned?: number;
+  spf_aligned?: number;
+  sources?: ReportSource[];
+}
+
+export function useReports(filters: {
+  status?: string; brand?: string; kind?: string; reporter?: string; page: number;
+}) {
   const qs = new URLSearchParams();
   if (filters.status) qs.set("status_f", filters.status);
   if (filters.brand) qs.set("brand", filters.brand);
   if (filters.kind) qs.set("kind", filters.kind);
+  if (filters.reporter) qs.set("reporter", filters.reporter);
   qs.set("page", String(filters.page));
   return useQuery({
     queryKey: ["reports", filters],
@@ -71,6 +88,12 @@ export const useReportRows = (id: string, page: number) =>
     queryKey: ["report", id, "rows", page],
     queryFn: () => api<Page<ReportRowEnvelope>>(`/reports/${id}/rows?page=${page}`),
     placeholderData: (prev) => prev,
+  });
+
+export const useReportBreakdown = (id: string) =>
+  useQuery({
+    queryKey: ["report", id, "breakdown"],
+    queryFn: () => api<ReportBreakdown>(`/reports/${id}/breakdown`),
   });
 
 export const useReportErrors = (id: string) =>
