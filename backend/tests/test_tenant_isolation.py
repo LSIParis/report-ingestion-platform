@@ -1,10 +1,13 @@
 """Test d'isolation cross-tenant. DOIT passer — bloquant en CI.
 Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture ET écriture.
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from app.db.models import Email, ParsingError, Report
+from app.db.models import Alert, Email, ParsingError, Report, Tenant
 from app.db.session import get_session, tenant_scoped_session
+from app.workers import tasks
 
 
 def test_tenant_a_cannot_read_tenant_b(seed_two_tenants):
@@ -24,6 +27,31 @@ def test_forged_insert_for_other_tenant_is_rejected(seed_two_tenants):
         with pytest.raises(Exception):
             db.flush()  # WITH CHECK doit rejeter l'écriture cross-tenant
         # Après l'erreur attendue, la transaction est en échec : on la nettoie pour
+        # que le context manager puisse se refermer proprement.
+        db.rollback()
+
+
+def test_forged_alert_insert_for_other_tenant_is_rejected(seed_two_tenants):
+    """Meme preuve que pour Report, mais pour `alert` (migration 0007) : une alerte
+    estampillee du tenant B, ecrite depuis une session scopee sur le tenant A, doit
+    etre rejetee -- pas seulement la lecture (USING), aussi l'ecriture forgee.
+
+    Verifie en direct (ALTER POLICY temporaire sur la base de dev, voir le rapport de
+    tache) : neutraliser SEULEMENT le WITH CHECK (le mettre a `true`) ne fait PAS
+    echouer ce test -- l'INSERT ORM demande un RETURNING (a cause de `opened_at`,
+    server_default), et Postgres applique alors aussi le USING sur la ligne retournee ;
+    l'ecriture cross-tenant est donc rejetee par ce filet de securite meme si le WITH
+    CHECK est casse. Le test ne devient rouge que si USING **et** WITH CHECK sont
+    neutralises ensemble (policy entierement cassee) -- confirme en direct. Ce test
+    protege donc contre une regression sur la policy dans son ensemble ; il ne peut pas
+    a lui seul distinguer laquelle des deux clauses a failli.
+    """
+    tid_a, tid_b = seed_two_tenants
+    with tenant_scoped_session(tenant_id=tid_a) as db:
+        db.add(Alert(tenant_id=tid_b, kind="silent_domain", severity="critical"))
+        with pytest.raises(Exception):
+            db.flush()  # la policy (USING+WITH CHECK) doit rejeter l'ecriture cross-tenant
+        # Apres l'erreur attendue, la transaction est en echec : on la nettoie pour
         # que le context manager puisse se refermer proprement.
         db.rollback()
 
@@ -185,4 +213,89 @@ def test_ip_TLS_vue_par_b_est_invisible_de_a(seed_two_tenants):
             db.query(ReportRow).filter(
                 ReportRow.data["sending_mta_ip"].astext == "198.51.100.77").delete(
                 synchronize_session=False)
+            db.commit()
+
+
+def test_les_alertes_d_un_tenant_sont_invisibles_de_l_autre(seed_two_tenants):
+    """Les alertes sont des données de client : `alert` porte un tenant_id, donc la RLS
+    s'applique — aucune exception, contrairement au cache ip_intel.
+    """
+    from datetime import datetime, timezone
+
+    from app.db.models import Alert
+
+    tid_a, tid_b = seed_two_tenants
+
+    with get_session() as db:
+        db.add(Alert(tenant_id=tid_b, kind="never_reported", dedup_key="",
+                     severity="critical", payload={"domain": "b"},
+                     opened_at=datetime.now(timezone.utc)))
+        db.commit()
+
+    try:
+        with tenant_scoped_session(tenant_id=tid_a) as db:
+            assert db.query(Alert).all() == []
+    finally:
+        with get_session() as db:
+            db.query(Alert).filter_by(tenant_id=tid_b).delete()
+            db.commit()
+
+
+def test_le_balayage_scope_bien_chaque_tenant(seed_two_tenants, monkeypatch):
+    """Le risque phare de ce chantier, dans le fichier BLOQUANT : les détecteurs
+    d'alerte (`app/services/alerting/detectors/`) n'ont AUCUN filtre `tenant_id`
+    applicatif -- ils comptent entièrement sur la RLS (CLAUDE.md). `reconcile_tenant`
+    (`app/workers/tasks.py`) DOIT donc leur ouvrir une session scopée par tenant
+    (`tenant_scoped_session`), jamais la session worker (`get_session()`, BYPASSRLS).
+
+    Copie volontaire, dans le fichier bloquant, de
+    `test_le_balayage_scope_bien_chaque_tenant` de `tests/test_alert_sweep.py` --
+    redondance assumée sur un test de sécurité (voir le rapport de tâche). Si ce
+    correctif venait à être défait (un `reconcile_tenant` rebranché sur `get_session()`),
+    ce fichier bloquant doit, lui aussi, virer au rouge.
+
+    `seed_two_tenants` donne à CHAQUE tenant un rapport frais -- on casse volontairement
+    cette symétrie pour rendre le test discriminant : A perd son unique rapport et
+    devient donc, seul des deux, un domaine qui n'a JAMAIS parlé. Les deux tenants sont
+    vieillis au-delà du délai de grâce (`alert_onboarding_grace_days`), sinon le
+    détecteur `never_reported` ne se prononce jamais, quel que soit l'état des rapports.
+
+    Sous RLS correcte, `reconcile_tenant(tid_a)` ouvre une session qui ne voit AUCUN
+    rapport (ni le sien -- il n'en a plus -- ni celui de B) -> `never_reported` se lève.
+    Sous bypass (le bug), la même requête verrait AUSSI le rapport de B ->
+    `db.query(Report.id).first()` ne serait plus None -> A ne lèverait RIEN. C'est cette
+    différence de COMPORTEMENT -- pas la valeur de `tenant_id` sur l'alerte -- que ce
+    test attrape (`db.get(Tenant, tenant_id)` renverrait le bon tenant même sous bypass).
+
+    PREUVE (voir le rapport de tâche) : ce test est ROUGE quand `reconcile_tenant` est
+    temporairement branché sur `get_session()` (bypass) au lieu de
+    `tenant_scoped_session(...)`, et VERT une fois le code correct remis en place.
+    """
+    monkeypatch.setattr(tasks.notify_alerts, "delay", lambda *a, **k: None)
+    tid_a, tid_b = seed_two_tenants
+
+    vieux = datetime.now(timezone.utc) - timedelta(days=30)
+    with get_session() as db:  # plan worker : préparation du scénario, pas le test lui-même
+        db.query(Report).filter_by(tenant_id=tid_a).delete(synchronize_session=False)
+        db.get(Tenant, tid_a).created_at = vieux
+        db.get(Tenant, tid_b).created_at = vieux
+        db.commit()
+
+    try:
+        tasks.reconcile_tenant(tid_a)
+        tasks.reconcile_tenant(tid_b)
+
+        with get_session() as db:  # lecture système -- seulement pour VÉRIFIER le résultat
+            alertes_a = db.query(Alert).filter_by(tenant_id=tid_a).all()
+            alertes_b = db.query(Alert).filter_by(tenant_id=tid_b).all()
+
+        assert [a.kind for a in alertes_a] == ["never_reported"]
+        assert str(alertes_a[0].tenant_id) == tid_a
+        assert alertes_a[0].payload["domain"] == "tenant-a-test.com"  # PAS le domaine de B
+
+        assert alertes_b == []   # B a un rapport frais : rien à lever pour lui
+    finally:
+        with get_session() as db:
+            db.query(Alert).filter_by(tenant_id=tid_a).delete(synchronize_session=False)
+            db.query(Alert).filter_by(tenant_id=tid_b).delete(synchronize_session=False)
             db.commit()

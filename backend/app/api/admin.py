@@ -10,7 +10,15 @@ from app.api import mta_sts
 from app.auth.deps import get_tenant_ctx, require_role
 from app.auth.passwords import hash_password
 from app.config import settings
-from app.db.models import AppUser, Email, Report, Tenant, TenantMatchingRule, UserTenant
+from app.db.models import (
+    Alert,
+    AppUser,
+    Email,
+    Report,
+    Tenant,
+    TenantMatchingRule,
+    UserTenant,
+)
 from app.db.session import tenant_scoped_session
 from app.services import onboarding
 from app.services.audit import audit
@@ -291,6 +299,48 @@ def requeue_quarantine(ctx=Depends(get_tenant_ctx)):
 
     audit(actor=ctx.user, action="quarantine.requeued", metadata={"count": len(ids)})
     return {"requeued": len(ids)}
+
+
+@router.get("/alerts")
+def list_alerts(statut: str = Query("open", pattern="^(open|all)$", alias="status")):
+    """Les alertes, tous domaines confondus — c'est une vue d'exploitant.
+
+    Plan admin explicite (bypass), comme `list_tenants` : cette page existe précisément
+    pour voir ce qui se passe chez TOUS les clients. Les alertes elles-mêmes sont bien des
+    données de tenant (la table porte un tenant_id et la RLS s'applique) : un client ne
+    voit jamais que les siennes.
+
+    Les ouvertes d'abord, les plus récentes en tête : on veut savoir ce qui brûle
+    maintenant, pas relire l'histoire.
+
+    Le paramètre de fonction s'appelle `statut` (le nom `status` masquerait le module
+    `fastapi.status` utilisé partout ailleurs dans ce fichier) ; l'alias conserve
+    `?status=` comme contrat d'API, inchangé côté front.
+    """
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        q = db.query(Alert, Tenant.domain).join(Tenant, Alert.tenant_id == Tenant.id)
+        if statut == "open":
+            q = q.filter(Alert.closed_at.is_(None))
+        rows = q.order_by(Alert.closed_at.is_(None).desc(),
+                          Alert.opened_at.desc()).limit(200).all()
+
+        return [{
+            "id": str(a.id),
+            "domain": domain,
+            "kind": a.kind,
+            "severity": a.severity,
+            "dedup_key": a.dedup_key,
+            "payload": a.payload,
+            "opened_at": a.opened_at.isoformat(),
+            "closed_at": a.closed_at.isoformat() if a.closed_at else None,
+            # `notified_at` a été scindée en deux (migration 0008) : une alerte est
+            # légitimement notifiée à deux moments distincts de sa vie (ouverture,
+            # fermeture), et une seule colonne ne pourrait pas les distinguer.
+            "opened_notified_at": (
+                a.opened_notified_at.isoformat() if a.opened_notified_at else None),
+            "closed_notified_at": (
+                a.closed_notified_at.isoformat() if a.closed_notified_at else None),
+        } for a, domain in rows]
 
 
 # ------------------------------------------------------- règles de résolution
