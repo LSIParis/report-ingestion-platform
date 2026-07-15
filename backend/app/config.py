@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     # --- Alertes ---
+    # Canal d'alerte : "webhook" (défaut, l'existant) ou "desk365" (ticket dans le
+    # helpdesk). Le couplage a chaque fournisseur est isolé dans app/services/alerting/
+    # channels/<nom>.py.
+    alert_channel: str = "webhook"
     # URL générique : un POST JSON. Aucun couplage à un fournisseur (n8n, un script, un
     # endpoint à vous). Vide → aucun envoi, mais les alertes s'ouvrent quand même en base
     # et l'absence d'envoi est JOURNALISÉE. On n'avale jamais une alerte en silence.
@@ -88,6 +92,22 @@ class Settings(BaseSettings):
     # ferme d'elle-même — un domaine devenu silencieux depuis ne doit pas laisser une
     # alerte TLS crier sur des cendres.
     alert_tls_window_days: int = 7
+
+    # --- Canal Desk365 (helpdesk) ---
+    # Base d'API v3. La cle est un SECRET : fournie en variable d'environnement, jamais
+    # committee. Vide => canal non configure (envoyer renvoie False, journalise).
+    desk365_base_url: str = "https://lsi-maintenance.desk365.io/apis/v3"
+    desk365_api_key: str = ""
+    # Parametres FIXES du ticket. Valeurs par defaut = celles demandees ; modifiables par
+    # variable d'environnement sans toucher au code.
+    desk365_requester_email: str = "alerte_dmarc@lsiparis.tech"
+    desk365_group: str = "Support informatique"
+    desk365_priority: int = 20               # 20 = Urgent (bareme Desk365)
+    desk365_category: str = "Réseau"
+    desk365_subcategory: str = "Déliverabilité emails"
+    # Statut REQUIS par l'API Desk365 a la creation (confirme reel : 400 "missing field
+    # Status" sinon).
+    desk365_status: str = "Open"
 
     def model_post_init(self, __context) -> None:
         """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""

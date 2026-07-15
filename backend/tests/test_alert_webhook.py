@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import pytest
 import structlog.testing
 
-from app.services.alerting import webhook
+from app.services.alerting.channels import webhook
 
 
 class _Alerte:
