@@ -11,6 +11,13 @@ export interface Report {
   row_count: number;
   parsed_at: string | null;
   created_at: string;
+  kind: "dmarc" | "tls";
+  reporter: string | null;
+  total_units: number | null;
+  failing_units: number | null;
+  units_partial: boolean;
+  period_start: string | null;
+  period_end: string | null;
 }
 
 export interface Page<T> {
@@ -43,10 +50,11 @@ export interface ReportRowEnvelope {
   data: Record<string, unknown>;
 }
 
-export function useReports(filters: { status?: string; brand?: string; page: number }) {
+export function useReports(filters: { status?: string; brand?: string; kind?: string; page: number }) {
   const qs = new URLSearchParams();
   if (filters.status) qs.set("status_f", filters.status);
   if (filters.brand) qs.set("brand", filters.brand);
+  if (filters.kind) qs.set("kind", filters.kind);
   qs.set("page", String(filters.page));
   return useQuery({
     queryKey: ["reports", filters],
