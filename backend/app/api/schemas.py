@@ -20,6 +20,13 @@ class ReportOut(BaseModel):
     row_count: int
     parsed_at: datetime | None
     created_at: datetime
+    kind: str
+    reporter: str | None
+    total_units: int | None
+    failing_units: int | None
+    units_partial: bool
+    period_start: date | None
+    period_end: date | None
 
 
 class ReportRowOut(BaseModel):

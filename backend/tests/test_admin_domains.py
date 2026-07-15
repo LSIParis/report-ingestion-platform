@@ -149,7 +149,7 @@ def test_un_domaine_qui_a_collecte_ne_peut_pas_etre_supprime(client, cleanup):
         db.add(em)
         db.flush()
         db.add(Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                      status="ok", row_count=3))
+                      status="ok", row_count=3, kind="dmarc"))
         db.commit()
 
     r = client.delete(f"/admin/tenants/{tid}")

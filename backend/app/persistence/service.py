@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.db.models import ParsingError, Report, ReportRow
 from app.db.session import get_session
 from app.parsing.base import ParseResult
+from app.persistence.summary import summarize
 
 
 class PersistenceService:
@@ -23,11 +24,16 @@ class PersistenceService:
             session.execute(text("SELECT set_config('app.current_tenant', :tid, true)"),
                             {"tid": str(tenant_id)})
 
+            resume = summarize(result.rows)
             report = Report(
                 tenant_id=tenant_id, email_id=email_id, attachment_id=attachment_id,
                 profile_id=profile_id, source_type=source_type,
                 status=result.status, row_count=len(result.rows),
                 parsed_at=datetime.now(timezone.utc),
+                kind=resume.kind, reporter=resume.reporter,
+                total_units=resume.total_units, failing_units=resume.failing_units,
+                units_partial=resume.units_partial,
+                period_start=resume.period_start, period_end=resume.period_end,
             )
             session.add(report)
             session.flush()

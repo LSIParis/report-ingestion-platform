@@ -23,7 +23,8 @@ def _report() -> Report:
                   source_type="attachment", status="parsed_ok",
                   profile_id="_default_dmarc_xml", row_count=7,
                   parsed_at=datetime.now(timezone.utc),
-                  created_at=datetime.now(timezone.utc))
+                  created_at=datetime.now(timezone.utc), kind="dmarc",
+                  units_partial=False)
 
 
 def test_report_orm_est_serialisable():

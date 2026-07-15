@@ -80,7 +80,7 @@ def _rapport_recent(tid: str) -> None:
                   status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok", kind="dmarc")
         db.add(rep)
         db.commit()
 
@@ -266,7 +266,7 @@ def _rapport_tls(tid: str, *, il_y_a_jours: int = 1) -> None:
         db.add(em)
         db.flush()
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                    profile_id="_default_tlsrpt_json", status="ok", created_at=quand)
+                    profile_id="_default_tlsrpt_json", status="ok", created_at=quand, kind="dmarc")
         db.add(rep)
         db.flush()
         report_date = quand.date().isoformat()

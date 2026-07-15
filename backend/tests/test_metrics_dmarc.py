@@ -59,7 +59,7 @@ def dataset():
                    status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok", kind="dmarc")
         db.add(rep)
         db.flush()
 
@@ -120,7 +120,7 @@ def dataset_avec_lignes_tls(dataset):
                    status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok", kind="dmarc")
         db.add(rep)
         db.flush()
         db.add_all([

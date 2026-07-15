@@ -15,10 +15,13 @@ store = ObjectStore.from_settings(settings)
 
 @router.get("", response_model=Page[ReportOut])
 def list_reports(status_f: str | None = None, brand: str | None = None,
+                 kind: str | None = None,
                  db=Depends(get_db), pg=Depends(page_params)):
     q = db.query(Report)
     if status_f:
         q = q.filter(Report.status == status_f)
+    if kind:
+        q = q.filter(Report.kind == kind)
     if brand:
         q = q.join(Email, Email.id == Report.email_id)\
              .filter(Email.from_address.ilike(f"%{brand}%"))

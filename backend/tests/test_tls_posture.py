@@ -37,7 +37,7 @@ def tenant_tls():
                    raw_object_key="raw/x.eml", status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=t.id, email_id=em.id, source_type="attachment", status="ok", kind="tls")
         db.add(rep)
         db.flush()
         ids = (str(t.id), str(em.id), str(rep.id))
@@ -194,7 +194,7 @@ def test_rapport_illisible_bloque_safe_to_enforce_et_est_compte(tenant_tls):
         db.add(em)
         db.flush()
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     status="failed", profile_id="_default_tlsrpt_json")
+                     status="failed", profile_id="_default_tlsrpt_json", kind="tls")
         db.add(rep)
         db.commit()
 
@@ -231,7 +231,7 @@ def test_piece_jointe_illisible_est_comptee_comme_rapport_illisible(tenant_tls):
         # Comme `_record_parsing_failure` : profile_id NULL, on n'a jamais su ce que
         # c'etait (rapport DMARC ? TLS ? ni l'un ni l'autre ?).
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     status="failed", profile_id=None)
+                     status="failed", profile_id=None, kind="tls")
         db.add(rep)
         db.commit()
 
@@ -266,7 +266,7 @@ def test_profil_tls_specifique_au_tenant_est_reconnu(tenant_tls):
         # profil partage `_default_tlsrpt_json`), comme le produirait `select_profile()`
         # si `profiles/tls-test_tlsrpt_json.json` existait.
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     status="failed", profile_id="tls-test_tlsrpt_json")
+                     status="failed", profile_id="tls-test_tlsrpt_json", kind="tls")
         db.add(rep)
         db.commit()
 
@@ -299,7 +299,7 @@ def test_rapport_rejete_par_le_garde_anti_usurpation_ne_bloque_pas_le_feu_vert(t
         db.add(em)
         db.flush()
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     status="failed", profile_id="_default_tlsrpt_json")
+                     status="failed", profile_id="_default_tlsrpt_json", kind="tls")
         db.add(rep)
         db.flush()
         db.add(ParsingError(tenant_id=tid, email_id=em.id, report_id=rep.id,
@@ -341,7 +341,7 @@ def test_piece_jointe_infectee_ne_bloque_pas_le_feu_vert(tenant_tls):
         # scan antivirus a lieu AVANT detect_format, la nature du fichier n'est
         # jamais etablie), Report en echec.
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
-                     status="failed", profile_id=None)
+                     status="failed", profile_id=None, kind="tls")
         db.add(rep)
         db.flush()
         db.add(ParsingError(tenant_id=tid, email_id=em.id, report_id=rep.id,
@@ -374,7 +374,8 @@ def test_rapport_illisible_hors_fenetre_nest_pas_compte(tenant_tls):
         db.flush()
         rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment",
                      status="failed", profile_id="_default_tlsrpt_json",
-                     created_at=datetime.now(timezone.utc) - timedelta(days=90))
+                     created_at=datetime.now(timezone.utc) - timedelta(days=90),
+                     kind="tls")
         db.add(rep)
         db.commit()
 
@@ -491,7 +492,7 @@ def _nouveau_rapport(tid: str, reporter: str) -> str:
                    raw_object_key="raw/x.eml", status="parsed_ok")
         db.add(em)
         db.flush()
-        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok")
+        rep = Report(tenant_id=tid, email_id=em.id, source_type="attachment", status="ok", kind="tls")
         db.add(rep)
         db.flush()
         rid = str(rep.id)

@@ -23,7 +23,7 @@ def test_forged_insert_for_other_tenant_is_rejected(seed_two_tenants):
     with tenant_scoped_session(tenant_id=tid_a) as db:
         # email_id valide côté A pour satisfaire la FK ; tenant_id estampillé B (interdit).
         email_a = db.query(Email).first()
-        db.add(Report(tenant_id=tid_b, email_id=email_a.id, source_type="body", status="ok"))
+        db.add(Report(tenant_id=tid_b, email_id=email_a.id, source_type="body", status="ok", kind="dmarc"))
         with pytest.raises(Exception):
             db.flush()  # WITH CHECK doit rejeter l'écriture cross-tenant
         # Après l'erreur attendue, la transaction est en échec : on la nettoie pour
@@ -137,7 +137,7 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
         # bloquant.
         rep_b_illisible = Report(tenant_id=tid_b, email_id=rep_b.email_id,
                                  source_type="attachment", status="failed",
-                                 profile_id="_default_tlsrpt_json")
+                                 profile_id="_default_tlsrpt_json", kind="dmarc")
         db.add(rep_b_illisible)
         db.flush()
         rep_b_illisible_id = str(rep_b_illisible.id)
@@ -155,7 +155,7 @@ def test_tls_posture_tenant_a_ne_voit_rien_de_b(seed_two_tenants):
         # scenario ou une telle regression se verrait.
         rep_b_usurpe = Report(tenant_id=tid_b, email_id=rep_b.email_id,
                               source_type="attachment", status="failed",
-                              profile_id="_default_tlsrpt_json")
+                              profile_id="_default_tlsrpt_json", kind="dmarc")
         db.add(rep_b_usurpe)
         db.flush()
         db.add(ParsingError(tenant_id=tid_b, email_id=rep_b.email_id,
