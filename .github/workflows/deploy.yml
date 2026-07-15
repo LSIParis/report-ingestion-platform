@@ -1,0 +1,46 @@
+name: Deploy to Portainer
+
+# Auto-deploiement de la stack `dmarc-reports` (Portainer, endpoint Docker Thor).
+#
+# Le piege que ce workflow evite : les images sont construites par `build-images.yml`
+# (~2 min). Un webhook GitHub BRUT se declencherait a l instant du push, AVANT que la
+# nouvelle image :latest existe sur GHCR -- Portainer redeploierait l ancien code.
+#
+# D ou la chaine correcte : push -> build-images publie les images -> CE workflow
+# declenche le webhook Portainer, qui re-tire les images fraiches (forcePullImage=true)
+# et rejoue les migrations. Le deploiement n a lieu qu une fois les images pretes.
+
+on:
+  # Apres un build d images REUSSI : on deploie les nouvelles images.
+  workflow_run:
+    workflows: ["Build & Push images (GHCR)"]
+    types: [completed]
+    branches: [main]
+  # Changement du compose SEUL (aucune image a reconstruire) : deploiement direct,
+  # sinon une modif du stack ne partirait jamais en prod (build-images ne se declenche
+  # pas sur infra/**).
+  push:
+    branches: [main]
+    paths:
+      - "infra/portainer-stack.npm.yml"
+
+# Un seul deploiement a la fois ; on ne cancel pas un deploiement en cours.
+concurrency:
+  group: deploy-portainer
+  cancel-in-progress: false
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    # Sur `push` (compose) : toujours. Sur `workflow_run` : seulement si le build a REUSSI
+    # -- ne jamais deployer par-dessus des images qui n ont pas ete publiees.
+    if: ${{ github.event_name == 'push' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Declencher le redeploiement Portainer
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}")
+          echo "Portainer webhook -> HTTP $code"
+          case "$code" in
+            2*) echo "Redeploiement declenche." ;;
+            *)  echo "::error::Le webhook Portainer a repondu $code"; exit 1 ;;
+          esac
