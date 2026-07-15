@@ -63,7 +63,9 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          build-args: ${{ matrix.build_args }}
+          build-args: |
+            ${{ matrix.build_args }}
+            VITE_BUILD_SHA=${{ github.sha }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
