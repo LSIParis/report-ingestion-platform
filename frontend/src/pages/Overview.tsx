@@ -14,6 +14,7 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
+import { IpPanel } from "../components/IpPanel";
 
 /* La page d'accueil répond à la question du client : « qui envoie du courrier en mon nom,
    et combien de ces messages échouent à l'authentification ? ». On raisonne donc en
@@ -56,6 +57,9 @@ const RANGES = [7, 30, 90] as const;
 
 export function Overview() {
   const [days, setDays] = useState<number>(30);
+  // L'IP source est le point d'entree de l'enquete : cliquable, elle ouvre le meme
+  // panneau lateral que la page Rapports (IpPanel). null = panneau ferme.
+  const [ip, setIp] = useState<string | null>(null);
 
   const summary = useQuery({
     queryKey: ["dmarc", "summary", days],
@@ -244,7 +248,14 @@ export function Overview() {
                 <tbody>
                   {(sources.data ?? []).map((r) => (
                     <tr key={r.source_ip} className="border-t">
-                      <td className="px-4 py-2 font-mono text-xs">{r.source_ip}</td>
+                      <td className="px-4 py-2">
+                        <button
+                          onClick={() => setIp(r.source_ip)}
+                          className="font-mono text-xs text-blue-600 hover:underline"
+                        >
+                          {r.source_ip}
+                        </button>
+                      </td>
                       <td className="px-4 py-2 text-gray-500">{r.reporter ?? "—"}</td>
                       <td className="px-4 py-2 text-right tabular-nums">{fmt(r.messages)}</td>
                       <td className="px-4 py-2">
@@ -268,6 +279,8 @@ export function Overview() {
           </section>
         </>
       )}
+
+      {ip && <IpPanel ip={ip} onClose={() => setIp(null)} />}
     </div>
   );
 }
