@@ -11,6 +11,8 @@ venv/
 node_modules/
 dist/
 .vite/
+*.tsbuildinfo
+frontend/package-lock.json
 
 # Env & secrets
 .env
