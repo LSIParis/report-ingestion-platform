@@ -93,6 +93,19 @@ class Settings(BaseSettings):
     # alerte TLS crier sur des cendres.
     alert_tls_window_days: int = 7
 
+    # --- Canal Desk365 (helpdesk) ---
+    # Base d'API v3. La cle est un SECRET : fournie en variable d'environnement, jamais
+    # committee. Vide => canal non configure (envoyer renvoie False, journalise).
+    desk365_base_url: str = "https://lsi-maintenance.desk365.io/apis/v3"
+    desk365_api_key: str = ""
+    # Parametres FIXES du ticket. Valeurs par defaut = celles demandees ; modifiables par
+    # variable d'environnement sans toucher au code.
+    desk365_requester_email: str = "alerte_dmarc@lsiparis.tech"
+    desk365_group: str = "Support informatique"
+    desk365_priority: int = 20               # 20 = Urgent (bareme Desk365)
+    desk365_category: str = "Réseau"
+    desk365_subcategory: str = "Déliverabilité emails"
+
     def model_post_init(self, __context) -> None:
         """Résout les clés JWT. Priorité : fichier monté > base64 > valeur brute."""
         import base64
