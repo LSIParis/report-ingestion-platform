@@ -213,7 +213,7 @@ def notify_alerts(self, events: list[tuple[str, str]]) -> None:
     l'intérieur d'une seule tâche, élimine la course : aucune tâche indépendante ne peut
     en doubler une autre.
 
-    On s'ARRÊTE au premier échec (`WebhookIndisponible`) plutôt que de continuer sur les
+    On s'ARRÊTE au premier échec (`CanalIndisponible`) plutôt que de continuer sur les
     événements suivants : continuer ferait exactement repartir le bug qu'on corrige (une
     ouverture partirait avant qu'une fermeture, retentée plus tard, n'ait pu partir).
     Toute la tâche est retentée par Celery, reprenant la liste depuis le début.
@@ -222,7 +222,7 @@ def notify_alerts(self, events: list[tuple[str, str]]) -> None:
     protégée par sa propre garde d'idempotence (`opened_notified_at` /
     `closed_notified_at`, déjà en base). Si la tâche est retentée après avoir notifié
     les 3 premiers événements sur 5, les 3 premiers sont des no-op (déjà notifiés) et
-    seuls les 2 restants repartent réellement sur le webhook -- rejouer la tâche
+    seuls les 2 restants repartent réellement sur le canal -- rejouer la tâche
     ENTIÈRE est donc sans danger. Vérifié par
     `test_rejouer_notify_alerts_ne_renvoie_pas_ce_qui_est_deja_notifie`.
     """
@@ -239,11 +239,11 @@ def _notifier_un_evenement(db, event: str, alert_id: str) -> None:
     par `notify_alerts` pour chaque événement d'un cycle -- factorisé pour que la boucle
     ci-dessus reste lisible et que l'arrêt au premier échec soit explicite.
 
-    Idempotence RÉELLE mais PAS STRICTE : la garde est vérifiée AVANT le POST, et la
+    Idempotence RÉELLE mais PAS STRICTE : la garde est vérifiée AVANT l'envoi, et la
     colonne *_notified_at n'est commit qu'APRÈS. Un worker tué entre les deux renverra
     donc la même notification au rejeu -- un doublon, jamais une perte. C'est un choix
-    assumé (voir `webhook.py`) : un doublon sur un webhook coûte moins cher qu'une
-    alerte jamais vue.
+    assumé, valable pour tout canal (webhook, Desk365…) : un doublon coûte moins cher
+    qu'une alerte jamais vue.
     """
     alerte = db.get(Alert, alert_id)
     if not alerte:
@@ -269,27 +269,29 @@ def _notifier_un_evenement(db, event: str, alert_id: str) -> None:
     # Idempotence : `task_acks_late=True` (app/celery_app.py) => livraison Celery
     # AT-LEAST-ONCE. Un worker tué après l'envoi mais avant l'acquittement REJOUE la
     # tâche -- sans garde, la même notification repartirait deux fois sur le
-    # webhook. Une alerte est notifiée deux fois LÉGITIMEMENT dans sa vie (à son
+    # canal. Une alerte est notifiée deux fois LÉGITIMEMENT dans sa vie (à son
     # ouverture, puis à sa fermeture) : une seule colonne ne peut pas distinguer les
     # deux, d'où deux colonnes dédiées (migration 0008), chacune la garde de SON
     # événement.
     if deja_notifiee is not None:
         return
 
-    # `envoyer()` peut lever `WebhookIndisponible` (canal CONFIGURÉ mais EN PANNE) : dans
-    # ce cas, l'exception remonte à travers cette fonction AVANT d'atteindre les lignes
-    # suivantes -- la colonne *_notified_at reste NULL et l'événement repart bien au
-    # prochain balayage. C'est le seul cas qu'on retente.
+    # `envoyer()` peut lever `CanalIndisponible` (canal CONFIGURÉ mais EN PANNE, quel
+    # qu'il soit -- webhook, Desk365…) : dans ce cas, l'exception remonte à travers
+    # cette fonction AVANT d'atteindre les lignes suivantes -- la colonne
+    # *_notified_at reste NULL et l'événement repart bien au prochain balayage.
+    # C'est le seul cas qu'on retente.
     #
-    # `envoyer()` renvoie False dans un seul autre cas : `ALERT_WEBHOOK_URL` n'est pas
-    # configurée (voir `webhook.envoyer`). Ce n'est PAS une panne : « pas de canal
-    # configuré » est un état STABLE, déjà journalisé (dans `webhook.envoyer`) -- inutile
-    # de le reconstater à chaque cycle. On pose donc la colonne *_notified_at qu'on ait
-    # RÉELLEMENT envoyé, ou délibérément PAS envoyé faute de canal : c'est précisément ce
-    # qui sort l'événement du filet de rattrapage (`fermetures_manquees` /
-    # `ouvertures_manquees` dans `reconcile_tenant`). Sans cette distinction, ce filet
-    # reprendrait la MÊME alerte à CHAQUE balayage -- un batch qui grossit sans borne sur
-    # une plateforme qui n'a jamais configuré de webhook (le cas par défaut).
+    # `envoyer()` renvoie False dans un seul autre cas : le canal n'est PAS configuré
+    # (ou n'a rien à émettre pour cet événement). Ce n'est PAS une panne : « pas de
+    # canal configuré » est un état STABLE, déjà journalisé par le canal lui-même --
+    # inutile de le reconstater à chaque cycle. On pose donc la colonne *_notified_at
+    # qu'on ait RÉELLEMENT envoyé, ou délibérément PAS envoyé faute de canal : c'est
+    # précisément ce qui sort l'événement du filet de rattrapage
+    # (`fermetures_manquees` / `ouvertures_manquees` dans `reconcile_tenant`). Sans
+    # cette distinction, ce filet reprendrait la MÊME alerte à CHAQUE balayage -- un
+    # batch qui grossit sans borne sur une plateforme qui n'a configuré aucun canal
+    # (le cas par défaut).
     get_channel().envoyer(event, alerte, tenant)
     now = datetime.now(timezone.utc)
     if event == "opened":
