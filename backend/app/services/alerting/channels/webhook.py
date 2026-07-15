@@ -28,13 +28,14 @@ from datetime import datetime, timezone
 import structlog
 
 from app.config import settings
+from app.services.alerting.channels.base import CanalIndisponible
 
 log = structlog.get_logger()
 
 TIMEOUT = 10.0
 
 
-class WebhookIndisponible(Exception):
+class WebhookIndisponible(CanalIndisponible):
     """L'URL est configurée mais l'envoi a échoué. Celery retentera."""
 
 

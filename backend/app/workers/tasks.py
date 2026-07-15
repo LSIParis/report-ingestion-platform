@@ -18,7 +18,8 @@ from app.parsing.guards import guard_report_domain
 from app.parsing.registry import get_adapter
 from app.persistence.service import PersistenceService
 from app.services import antivirus
-from app.services.alerting import webhook
+from app.services.alerting.channels import get_channel
+from app.services.alerting.channels.base import CanalIndisponible
 from app.services.alerting.reconciler import reconcile
 from app.services.antivirus import AntivirusUnavailable
 from app.services.audit import audit
@@ -229,7 +230,7 @@ def notify_alerts(self, events: list[tuple[str, str]]) -> None:
         for event, alert_id in events:
             try:
                 _notifier_un_evenement(db, event, alert_id)
-            except webhook.WebhookIndisponible as exc:
+            except CanalIndisponible as exc:
                 raise self.retry(exc=exc)  # noqa: B904 — retry Celery
 
 
@@ -289,7 +290,7 @@ def _notifier_un_evenement(db, event: str, alert_id: str) -> None:
     # `ouvertures_manquees` dans `reconcile_tenant`). Sans cette distinction, ce filet
     # reprendrait la MÊME alerte à CHAQUE balayage -- un batch qui grossit sans borne sur
     # une plateforme qui n'a jamais configuré de webhook (le cas par défaut).
-    webhook.envoyer(event, alerte, tenant)
+    get_channel().envoyer(event, alerte, tenant)
     now = datetime.now(timezone.utc)
     if event == "opened":
         alerte.opened_notified_at = now

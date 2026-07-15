@@ -13,6 +13,7 @@ import pytest
 
 from app.db.models import Alert, Email, Report, ReportRow, Tenant
 from app.db.session import get_session
+from app.services.alerting.channels import webhook
 from app.workers import tasks
 
 
@@ -208,7 +209,7 @@ def test_le_rattrapage_ne_grossit_pas_sans_borne_sans_webhook_configure(
     Celery) pour que `_notifier_un_evenement` s'exécute réellement, avec un webhook
     délibérément NON configuré.
     """
-    monkeypatch.setattr(tasks.webhook.settings, "alert_webhook_url", "")
+    monkeypatch.setattr(webhook.settings, "alert_webhook_url", "")
     monkeypatch.setattr(tasks.notify_alerts, "delay", tasks.notify_alerts)
     tid_a, tid_b = deux_domaines
 
@@ -324,7 +325,7 @@ def test_une_aggravation_de_severite_notifie_la_fermeture_avant_l_ouverture(
     final (`webhook.envoyer`) est simulé.
     """
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer",
+    monkeypatch.setattr(webhook, "envoyer",
                         lambda event, alerte, tenant: appels.append(event) or True)
     monkeypatch.setattr(tasks.notify_alerts, "delay", tasks.notify_alerts)
 
@@ -423,7 +424,7 @@ def test_une_ouverture_deja_notifiee_ne_repart_pas(un_tenant, monkeypatch):
     worker tué après l'envoi mais avant l'acquittement REJOUE la tâche. Sans garde, la
     même ouverture repartirait une deuxième fois sur le webhook."""
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer",
+    monkeypatch.setattr(webhook, "envoyer",
                         lambda event, alerte, tenant: appels.append(event) or True)
 
     aid = _cree_alerte(un_tenant, opened_notified_at=datetime.now(timezone.utc))
@@ -438,7 +439,7 @@ def test_une_fermeture_part_meme_si_l_ouverture_a_deja_ete_notifiee(un_tenant, m
     à la fermeture. La garde contre le rejeu ne doit pas confondre les deux : c'est tout
     l'intérêt d'avoir deux colonnes (`opened_notified_at` / `closed_notified_at`)."""
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer",
+    monkeypatch.setattr(webhook, "envoyer",
                         lambda event, alerte, tenant: appels.append(event) or True)
 
     now = datetime.now(timezone.utc)
@@ -455,7 +456,7 @@ def test_une_fermeture_part_meme_si_l_ouverture_a_deja_ete_notifiee(un_tenant, m
 def test_une_fermeture_deja_notifiee_ne_repart_pas(un_tenant, monkeypatch):
     """Symétrique : la garde protège aussi la fermeture elle-même contre le rejeu."""
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer",
+    monkeypatch.setattr(webhook, "envoyer",
                         lambda event, alerte, tenant: appels.append(event) or True)
 
     now = datetime.now(timezone.utc)
@@ -493,7 +494,7 @@ def test_notify_alerts_tenant_supprime_ne_casse_pas(monkeypatch):
 
     monkeypatch.setattr(tasks, "get_session", lambda: _FakeSessionCtx())
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer", lambda *a, **k: appels.append(a) or True)
+    monkeypatch.setattr(webhook, "envoyer", lambda *a, **k: appels.append(a) or True)
 
     tasks.notify_alerts([("opened", "peu-importe")])     # ne doit pas lever
 
@@ -517,7 +518,7 @@ def test_rejouer_notify_alerts_ne_renvoie_pas_ce_qui_est_deja_notifie(un_tenant,
     le premier est déjà notifié (comme après un rejeu partiel), seul le second doit
     réellement partir sur le webhook."""
     appels = []
-    monkeypatch.setattr(tasks.webhook, "envoyer",
+    monkeypatch.setattr(webhook, "envoyer",
                         lambda event, alerte, tenant: appels.append(event) or True)
 
     deja = _cree_alerte(un_tenant, dedup_key="deja",

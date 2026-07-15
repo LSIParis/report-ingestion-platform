@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     # --- Alertes ---
+    # Canal d'alerte : "webhook" (défaut, l'existant) ou "desk365" (ticket dans le
+    # helpdesk). Le couplage a chaque fournisseur est isolé dans app/services/alerting/
+    # channels/<nom>.py.
+    alert_channel: str = "webhook"
     # URL générique : un POST JSON. Aucun couplage à un fournisseur (n8n, un script, un
     # endpoint à vous). Vide → aucun envoi, mais les alertes s'ouvrent quand même en base
     # et l'absence d'envoi est JOURNALISÉE. On n'avale jamais une alerte en silence.
