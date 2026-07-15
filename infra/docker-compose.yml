@@ -74,6 +74,8 @@ services:
   worker:
     build: ../backend
     command: celery -A app.celery_app worker -l info
+    # HEALTHCHECK HTTP de l'image pense pour l'API ; ce service ne sert aucun port.
+    healthcheck: { disable: true }
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -96,6 +98,7 @@ services:
     # persistance au-dela d'un redemarrage (le planning est redeclare au code, pas lu
     # depuis ce fichier).
     command: celery -A app.celery_app beat -l info -s /tmp/celerybeat-schedule
+    healthcheck: { disable: true }
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -107,6 +110,7 @@ services:
   imap-worker:
     build: ../backend
     command: python -m app.workers.imap_worker
+    healthcheck: { disable: true }
     depends_on:
       migrate: { condition: service_completed_successfully }
     environment:

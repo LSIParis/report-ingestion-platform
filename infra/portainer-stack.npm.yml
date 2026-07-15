@@ -154,6 +154,10 @@ services:
     image: ghcr.io/lsiparis/report-api:latest
     restart: unless-stopped
     command: celery -A app.celery_app worker -l info --concurrency 4
+    # L'image report-api porte un HEALTHCHECK HTTP (GET :8000/health) pense pour l'API.
+    # Ce service ne sert aucun port : sans ce disable, Docker le marque unhealthy en
+    # boucle alors qu'il tourne parfaitement — un faux negatif qui masque les vrais.
+    healthcheck: { disable: true }
     networks: [internal]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -192,6 +196,7 @@ services:
     # repertoire inscriptible -- Beat n'a besoin d'aucune persistance (le planning est
     # declare dans le code, pas lu depuis ce fichier).
     command: celery -A app.celery_app beat -l info -s /tmp/celerybeat-schedule
+    healthcheck: { disable: true }      # ordonnanceur, aucun port : voir le worker
     networks: [internal]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -203,6 +208,7 @@ services:
     image: ghcr.io/lsiparis/report-api:latest
     restart: unless-stopped
     command: python -m app.workers.imap_worker
+    healthcheck: { disable: true }      # releve IMAP, aucun port : voir le worker
     networks: [internal]
     depends_on:
       migrate: { condition: service_completed_successfully }
