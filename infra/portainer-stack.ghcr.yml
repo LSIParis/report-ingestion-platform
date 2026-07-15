@@ -131,6 +131,10 @@ services:
     pull_policy: always
     restart: unless-stopped
     command: celery -A app.celery_app worker -l info --concurrency 4
+    # L'image report-api porte un HEALTHCHECK HTTP (GET :8000/health) pense pour l'API.
+    # Ce service ne sert aucun port : sans ce disable, Docker le marque unhealthy en
+    # boucle alors qu'il tourne parfaitement -- un faux negatif qui masque les vrais.
+    healthcheck: { disable: true }
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -175,6 +179,7 @@ services:
     pull_policy: always
     restart: unless-stopped
     command: python -m app.workers.imap_worker
+    healthcheck: { disable: true }      # releve IMAP, aucun port : voir le worker
     depends_on:
       migrate: { condition: service_completed_successfully }
       minio: { condition: service_healthy }
