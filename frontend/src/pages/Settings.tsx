@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { useMe } from "../api/account";
 import { useTenants } from "../api/admin";
+import { useApiKeys, useCreateApiKey, useRevokeApiKey, type CreatedApiKey } from "../api/apiKeys";
 import { ApiError } from "../api/client";
 import {
   generatePassword,
@@ -70,6 +71,8 @@ export function Settings() {
       {creating && (
         <CreateDialog tenants={tenants.data ?? []} onClose={() => setCreating(false)} />
       )}
+
+      <ApiKeysSection tenants={tenants.data ?? []} />
     </div>
   );
 }
@@ -478,5 +481,132 @@ function CreateDialog({
         )}
       </div>
     </div>
+  );
+}
+
+function ApiKeysSection({ tenants }: { tenants: { id: string; domain: string }[] }) {
+  const keys = useApiKeys();
+  const create = useCreateApiKey();
+  const revoke = useRevokeApiKey();
+  const [scope, setScope] = useState("platform");
+  const [tenantId, setTenantId] = useState("");
+  const [label, setLabel] = useState("");
+  const [fresh, setFresh] = useState<CreatedApiKey | null>(null);
+  const [error, setError] = useState("");
+
+  const ready = label.trim() !== "" && (scope === "platform" || tenantId !== "");
+
+  async function submit() {
+    setError("");
+    try {
+      const created = await create.mutateAsync({
+        scope,
+        tenant_id: scope === "domain" ? tenantId : undefined,
+        label: label.trim(),
+      });
+      setFresh(created);
+      setLabel("");
+      setTenantId("");
+    } catch {
+      setError("Création impossible.");
+    }
+  }
+
+  return (
+    <section className="space-y-3 rounded border bg-white p-4">
+      <div>
+        <h2 className="text-sm font-medium text-gray-700">Clés API</h2>
+        <p className="mt-1 max-w-2xl text-sm text-gray-500">
+          Pour les programmes tiers. Une clé <strong>plateforme</strong> lit tous les domaines
+          et peut en créer ; une clé <strong>par-domaine</strong> ne lit que son domaine.
+          Le secret ne s'affiche qu'une seule fois.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="text-sm">
+          <span className="mr-1 text-xs text-gray-600">Type</span>
+          <select value={scope} onChange={(e) => setScope(e.target.value)}
+                  className="rounded border px-2 py-1.5 text-sm">
+            <option value="platform">Plateforme</option>
+            <option value="domain">Par-domaine</option>
+          </select>
+        </label>
+        {scope === "domain" && (
+          <select value={tenantId} onChange={(e) => setTenantId(e.target.value)}
+                  className="rounded border px-2 py-1.5 text-sm">
+            <option value="">— domaine —</option>
+            {tenants.map((t) => <option key={t.id} value={t.id}>{t.domain}</option>)}
+          </select>
+        )}
+        <input value={label} onChange={(e) => setLabel(e.target.value)}
+               placeholder="Libellé (ex. ETL client X)"
+               className="rounded border px-3 py-1.5 text-sm" />
+        <button onClick={submit} disabled={!ready || create.isPending}
+                className="rounded bg-gray-900 px-3 py-1.5 text-sm text-white disabled:opacity-40">
+          Créer une clé
+        </button>
+      </div>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {fresh && (
+        <div className="rounded border bg-amber-50 p-3">
+          <div className="text-sm">
+            Copiez ce secret maintenant — il ne sera <strong>plus jamais</strong> affiché :
+          </div>
+          <div className="mt-1 flex items-center gap-3">
+            <code className="rounded border bg-white px-2 py-1 font-mono text-xs break-all">
+              {fresh.secret}
+            </code>
+            <button onClick={() => navigator.clipboard.writeText(fresh.secret)}
+                    className="text-xs text-gray-600 hover:underline">Copier</button>
+            <button onClick={() => setFresh(null)}
+                    className="text-xs text-gray-600 hover:underline">J'ai noté</button>
+          </div>
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
+              <th className="px-3 py-2 font-medium">Clé</th>
+              <th className="px-3 py-2 font-medium">Portée</th>
+              <th className="px-3 py-2 font-medium">Dernière utilisation</th>
+              <th className="px-3 py-2 font-medium">État</th>
+              <th className="px-3 py-2" />
+            </tr>
+          </thead>
+          <tbody>
+            {(keys.data ?? []).map((k) => (
+              <tr key={k.id} className="border-t">
+                <td className="px-3 py-2">
+                  <div className="font-mono text-xs">{k.prefix}…</div>
+                  <div className="text-xs text-gray-500">{k.label}</div>
+                </td>
+                <td className="px-3 py-2">{k.scope === "platform" ? "Plateforme" : k.domain}</td>
+                <td className="px-3 py-2 text-gray-500">
+                  {k.last_used_at ? new Date(k.last_used_at).toLocaleString("fr-FR") : "jamais"}
+                </td>
+                <td className="px-3 py-2">
+                  {k.revoked_at
+                    ? <span className="rounded bg-gray-200 px-1.5 py-0.5 text-xs text-gray-700">Révoquée</span>
+                    : <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-800">Active</span>}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {!k.revoked_at && (
+                    <button onClick={() => revoke.mutate(k.id)}
+                            className="text-xs text-red-600 hover:underline">Révoquer</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {keys.isSuccess && keys.data!.length === 0 && (
+              <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-500">Aucune clé.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
