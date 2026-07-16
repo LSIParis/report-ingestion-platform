@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import admin, emails, ingest, ip_intel, metrics, mta_sts, public, reports
+from app.api import admin, api_keys_admin, emails, ingest, ip_intel, metrics, mta_sts, public, reports
 from app.auth.login import router as auth_router
 from app.auth.middleware import TenantMiddleware
 
@@ -12,6 +12,7 @@ app.include_router(reports.router)
 app.include_router(emails.router)
 app.include_router(metrics.router)
 app.include_router(admin.router)
+app.include_router(api_keys_admin.router)
 app.include_router(public.router)
 app.include_router(ip_intel.router)
 app.include_router(ingest.router)     # /ingest/ses — public, sécurisé par signature SNS
