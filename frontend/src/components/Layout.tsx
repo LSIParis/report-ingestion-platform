@@ -22,10 +22,10 @@ export function Layout() {
         </Link>
         <div className="space-y-1">
           <NavLink to="/">Vue d'ensemble</NavLink>
+          {admin && <NavLink to="/admin/domains">Domaines</NavLink>}
           <NavLink to="/reports">Rapports</NavLink>
           <NavLink to="/metrics">Métriques</NavLink>
           {admin && <NavLink to="/quarantine">Quarantaine</NavLink>}
-          {admin && <NavLink to="/admin/domains">Domaines</NavLink>}
           {admin && <NavLink to="/admin/rules">Règles</NavLink>}
           {admin && <NavLink to="/alerts">Alertes</NavLink>}
           {admin && <NavLink to="/settings">Paramètres</NavLink>}
