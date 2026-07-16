@@ -128,7 +128,12 @@ function Row({
           )}
         </td>
         <td className="px-4 py-3 text-right whitespace-nowrap">
-          <button onClick={() => setFiche(true)} className="text-xs text-gray-600 hover:underline">
+          <button
+            onClick={() => !isSelf && setFiche(true)}
+            disabled={isSelf}
+            title={isSelf ? "Modifiez votre propre fiche via « Mon profil »" : undefined}
+            className="text-xs text-gray-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+          >
             Fiche
           </button>
           <span className="mx-2 text-gray-300">·</span>
