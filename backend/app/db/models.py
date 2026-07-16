@@ -67,6 +67,21 @@ class UserTenant(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), primary_key=True)
 
 
+class ApiKey(Base):
+    __tablename__ = "api_key"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # NULL = clé PLATEFORME (cross-tenant) ; renseigné = clé PAR-DOMAINE (scopée RLS).
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenant.id"), nullable=True)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)          # 'platform' | 'domain'
+    prefix: Mapped[str] = mapped_column(Text, nullable=False)         # début lisible du secret
+    key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)  # SHA-256 hex
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class TenantMatchingRule(Base):
     __tablename__ = "tenant_matching_rule"
     id: Mapped[uuid.UUID] = _uuid_pk()

@@ -13,6 +13,7 @@ from app.auth.passwords import hash_password
 from app.config import settings
 from app.db.models import (
     Alert,
+    ApiKey,
     AppUser,
     Email,
     Report,
@@ -163,11 +164,14 @@ def delete_tenant(tenant_id: str, ctx=Depends(get_tenant_ctx)):
 
         domain = tenant.domain
         db.query(TenantMatchingRule).filter_by(tenant_id=tenant.id).delete()
+        # Les clés API par-domaine de ce tenant deviennent caduques avec lui ; on les
+        # supprime pour ne pas heurter la FK api_key.tenant_id (qui produirait un 500).
+        keys_removed = db.query(ApiKey).filter_by(tenant_id=tenant.id).delete()
         db.delete(tenant)
         db.commit()
 
     audit(actor=ctx.user, action="tenant.deleted", target_id=tenant_id,
-          metadata={"domain": domain})
+          metadata={"domain": domain, "api_keys_removed": keys_removed})
 
 
 class MtaStsIn(BaseModel):

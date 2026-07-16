@@ -15,6 +15,7 @@ class TenantContext:
     tenant_ids: tuple[str, ...]
     active_tenant: str | None
     bypass: bool
+    api_key_scope: str | None = None   # None = principal JWT ; 'platform'|'domain' = clé API
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
@@ -38,15 +39,17 @@ class TenantMiddleware(BaseHTTPMiddleware):
         # erreur serveur — on convertit donc ici, à la frontière.
         try:
             token = self._bearer(request)
-            try:
-                claims = jwt.decode(
-                    token, settings.jwt_public_key, algorithms=["RS256"],
-                    audience=settings.jwt_audience, issuer=settings.jwt_issuer,
-                )
-            except jwt.PyJWTError as exc:
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"JWT invalide: {exc}")
-
-            request.state.tenant = self._build_context(request, claims)
+            if token.startswith("sk_"):
+                request.state.tenant = self._build_api_key_context(request, token)
+            else:
+                try:
+                    claims = jwt.decode(
+                        token, settings.jwt_public_key, algorithms=["RS256"],
+                        audience=settings.jwt_audience, issuer=settings.jwt_issuer,
+                    )
+                except jwt.PyJWTError as exc:
+                    raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"JWT invalide: {exc}")
+                request.state.tenant = self._build_context(request, claims)
         except HTTPException as exc:
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
@@ -87,3 +90,23 @@ class TenantMiddleware(BaseHTTPMiddleware):
 
         return TenantContext(user=claims["sub"], role=role, tenant_ids=tenant_ids,
                              active_tenant=active, bypass=False)
+
+    @staticmethod
+    def _build_api_key_context(request: Request, token: str) -> TenantContext:
+        # Import local : évite un cycle d'import au chargement du module.
+        from app.services.api_keys import resolve
+
+        if not request.url.path.startswith("/v1/"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "clé API limitée à /api/v1")
+        key = resolve(token)
+        if key is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "clé API invalide")
+        user = f"apikey:{key.prefix}"
+        if key.scope == "platform":
+            # Comme platform_admin : bypass par défaut, ou scopé si X-Tenant-Id fourni.
+            wanted = request.headers.get("X-Tenant-Id")
+            return TenantContext(user=user, role="platform_admin", tenant_ids=(),
+                                 active_tenant=wanted, bypass=(wanted is None),
+                                 api_key_scope="platform")
+        return TenantContext(user=user, role="tenant_viewer", tenant_ids=(key.tenant_id,),
+                             active_tenant=key.tenant_id, bypass=False, api_key_scope="domain")
