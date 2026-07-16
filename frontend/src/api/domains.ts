@@ -11,6 +11,7 @@ export interface Domain {
   last_report_at: string | null;
   active_rules: number;
   created_at: string;
+  alert_email: string | null;
 }
 
 export interface Step {
@@ -66,7 +67,7 @@ export function useCreateDomain() {
 export function useUpdateDomain() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name?: string; active?: boolean }) =>
+    mutationFn: ({ id, ...b }: { id: string; name?: string; active?: boolean; alert_email?: string }) =>
       api<Domain>(`/admin/tenants/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
