@@ -155,6 +155,14 @@ services:
       TLSRPT_MAILBOX: ${TLSRPT_MAILBOX:-}
       MTA_STS_IP: ${MTA_STS_IP:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
+      # Envoi SMTP (verification du changement d'e-mail cote API). SMTP_PASSWORD est un
+      # SECRET : variable d'environnement de la stack, JAMAIS committee. Non configure
+      # (SMTP_HOST vide) -> le changement d'e-mail renvoie une erreur claire, sans planter.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@lsiparis.tech}
 
   worker:
     image: ghcr.io/lsiparis/report-api:latest
@@ -196,6 +204,13 @@ services:
       # committee). Les autres parametres ont des defauts (voir app/config.py).
       DESK365_API_KEY: ${DESK365_API_KEY:-}
       DESK365_BASE_URL: ${DESK365_BASE_URL:-https://lsi-maintenance.desk365.io/apis/v3}
+      # Envoi SMTP (canal d'alerte e-mail, ALERT_CHANNEL=email). SMTP_PASSWORD est un SECRET :
+      # variable d'environnement de la stack, JAMAIS committee.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@lsiparis.tech}
 
   # Ordonnanceur des alertes. INDISPENSABLE : un domaine silencieux (ou qui n'a jamais
   # rapporte) ne produit AUCUN evenement -- on ne peut pas reagir a ce qui n'arrive pas.
