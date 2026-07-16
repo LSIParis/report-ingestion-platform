@@ -39,7 +39,7 @@ envoyer(event: str, alert, tenant) -> bool
 - Sujet : `[DMARC] {tenant.domain} — {nature}` (même famille de libellés que le canal
   Desk365 : une table `kind -> libellé lisible`, repli sur `alert.kind`).
 - Corps (français, texte simple) : domaine ; type + sévérité (`{alert.kind} ({alert.severity})`) ;
-  le `alert.message` ; les lignes de `alert.payload` (`  - clé : valeur`) ; et l'**état** —
+  les lignes de `alert.payload` (`  - clé : valeur`) ; et l'**état** —
   « Alerte OUVERTE » ou « Alerte RÉSOLUE » selon `event`.
 - `send_email(adresse, sujet, corps)` pour **chaque** destinataire (à la suite).
 - `EmailNonEnvoye` (SMTP non configuré / échec) → lève `EmailIndisponible(CanalIndisponible)`
