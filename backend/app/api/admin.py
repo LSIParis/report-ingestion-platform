@@ -8,6 +8,7 @@ from sqlalchemy import func
 
 from app.api import mta_sts
 from app.auth.deps import get_tenant_ctx, require_role
+from app.auth.emails import normalize_email
 from app.auth.passwords import hash_password
 from app.config import settings
 from app.db.models import (
@@ -464,6 +465,11 @@ class UserOut(BaseModel):
     id: UUID
     email: str
     role: str
+    first_name: str | None = None
+    last_name: str | None = None
+    company: str | None = None
+    address: str | None = None
+    phone: str | None = None
     tenants: list[dict]
     created_at: datetime
 
@@ -478,17 +484,23 @@ class UserIn(BaseModel):
     @field_validator("email")
     @classmethod
     def _email(cls, v: str) -> str:
-        # L'adresse n'est qu'un identifiant de connexion : on refuse l'évidemment
-        # invalide, sans embarquer un validateur RFC 5322 complet pour autant.
-        v = v.strip().lower()
-        if "@" not in v or v.startswith("@") or v.endswith("@") or " " in v:
-            raise ValueError("adresse e-mail invalide")
-        return v
+        return normalize_email(v)
 
 
 class UserPatch(BaseModel):
     role: str | None = None
     tenant_ids: list[UUID] | None = None
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    company: str | None = None
+    address: str | None = None
+    phone: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v: str | None) -> str | None:
+        return normalize_email(v) if v is not None else v
 
 
 class PasswordReset(BaseModel):
@@ -502,6 +514,8 @@ def _serialize(db, user: AppUser) -> dict:
               .order_by(Tenant.domain).all())
     return {"id": user.id, "email": user.email, "role": user.role,
             "created_at": user.created_at,
+            "first_name": user.first_name, "last_name": user.last_name,
+            "company": user.company, "address": user.address, "phone": user.phone,
             "tenants": [{"id": str(i), "domain": d} for i, d in rows]}
 
 
@@ -571,7 +585,11 @@ def update_user(user_id: str, body: UserPatch, ctx=Depends(get_tenant_ctx)):
                                        .filter_by(user_id=user.id).all()]
         else:
             current = body.tenant_ids
-        _validate(role, current)
+        # Ne revalider l'invariant role/domaines que si CETTE requete touche l'un des
+        # deux : un formulaire Fiche qui ne modifie que l'e-mail/l'identite ne doit pas
+        # etre bloque par un etat role/domaines preexistant qu'il ne cherche pas a changer.
+        if body.role is not None or body.tenant_ids is not None:
+            _validate(role, current)
 
         if body.role and body.role != user.role:
             _assert_not_self(ctx, user, "changer le rôle de")
@@ -581,6 +599,18 @@ def update_user(user_id: str, body: UserPatch, ctx=Depends(get_tenant_ctx)):
             db.query(UserTenant).filter_by(user_id=user.id).delete()
             for tid in body.tenant_ids:
                 db.add(UserTenant(user_id=user.id, tenant_id=tid))
+
+        if body.email is not None and body.email != user.email:
+            if db.query(AppUser).filter(AppUser.email == body.email,
+                                        AppUser.id != user.id).first():
+                raise HTTPException(status.HTTP_409_CONFLICT, "Cet e-mail est deja utilise")
+            user.email = body.email
+        # Identite : une cle presente (meme "") est appliquee ("" -> NULL) ; absente -> intacte.
+        # Le formulaire Fiche envoie les cinq champs ; le formulaire role/domaines ne les envoie pas.
+        for field in ("first_name", "last_name", "company", "address", "phone"):
+            val = getattr(body, field)
+            if val is not None:
+                setattr(user, field, val or None)
 
         db.flush()
         out = _serialize(db, user)
