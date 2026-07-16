@@ -3,10 +3,9 @@ from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.deps import get_tenant_ctx
-from app.auth.emails import normalize_email
 from app.auth.passwords import hash_password, verify_password
 from app.config import settings
 from app.db.models import AppUser, Tenant, UserTenant
@@ -71,6 +70,7 @@ class MeOut(BaseModel):
     company: str | None = None
     address: str | None = None
     phone: str | None = None
+    pending_email: str | None = None
 
 
 @router.get("/me", response_model=MeOut)
@@ -98,38 +98,26 @@ def me(ctx=Depends(get_tenant_ctx)):
             company=user.company if user else None,
             address=user.address if user else None,
             phone=user.phone if user else None,
+            pending_email=user.pending_email if user else None,
         )
 
 
 class ProfileIn(BaseModel):
-    email: str
     first_name: str | None = None
     last_name: str | None = None
     company: str | None = None
     address: str | None = None
     phone: str | None = None
 
-    @field_validator("email")
-    @classmethod
-    def _email(cls, v: str) -> str:
-        return normalize_email(v)
-
 
 @router.patch("/me", status_code=status.HTTP_204_NO_CONTENT)
 def update_me(body: ProfileIn, ctx=Depends(get_tenant_ctx)):
-    """Mise a jour par l'utilisateur de SA PROPRE fiche d'identite.
-
-    Ne touche JAMAIS role ni domaines (absents de ProfileIn) : pas d'elevation de
-    privilege possible. Le compte est resolu par ctx.user (e-mail du jeton signe).
-    """
+    """Mise a jour de SA PROPRE identite. Ne touche NI l'e-mail (voir /me/email/*), NI le
+    role, NI les domaines. Compte resolu par ctx.user (e-mail du jeton signe)."""
     with tenant_scoped_session(tenant_id=None, bypass=True) as db:
         user = db.query(AppUser).filter_by(email=ctx.user).first()
         if not user:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Compte introuvable")
-        if body.email != user.email and db.query(AppUser).filter(
-                AppUser.email == body.email, AppUser.id != user.id).first():
-            raise HTTPException(status.HTTP_409_CONFLICT, "Cet e-mail est deja utilise")
-        user.email = body.email
         user.first_name = body.first_name or None
         user.last_name = body.last_name or None
         user.company = body.company or None

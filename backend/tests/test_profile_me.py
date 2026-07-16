@@ -62,7 +62,7 @@ def test_patch_me_met_a_jour_l_identite():
     _make_user(email)
     try:
         c = _client(email)
-        r = c.patch("/auth/me", json={"email": email, "first_name": "Ada",
+        r = c.patch("/auth/me", json={"first_name": "Ada",
                                       "last_name": "Lovelace", "company": "LSI",
                                       "address": "1 rue X", "phone": "0600000000"})
         assert r.status_code == 204
@@ -90,26 +90,16 @@ def test_patch_me_ignore_role_et_domaines():
         _cleanup(email)
 
 
-def test_patch_me_email_deja_pris_409():
-    a = f"a-{uuid.uuid4().hex[:8]}@test.fr"
-    b_email = f"b-{uuid.uuid4().hex[:8]}@test.fr"
-    _make_user(a)
-    _make_user(b_email)
-    try:
-        r = _client(a).patch("/auth/me", json={"email": b_email})
-        assert r.status_code == 409
-    finally:
-        _cleanup(a, b_email)
-
-
-def test_patch_me_email_mis_en_minuscules():
+def test_patch_me_ne_change_pas_l_email():
     email = f"me-{uuid.uuid4().hex[:8]}@test.fr"
     _make_user(email)
-    new = email.upper()
     try:
-        r = _client(email).patch("/auth/me", json={"email": new})
+        c = _client(email)
+        r = c.patch("/auth/me", json={"email": "autre@test.fr", "first_name": "Ada"})
         assert r.status_code == 204
-        with get_session() as db:
-            assert db.query(AppUser).filter_by(email=email).first() is not None
+        b = c.get("/auth/me").json()
+        assert b["email"] == email          # inchange
+        assert b["first_name"] == "Ada"
+        assert b["pending_email"] is None
     finally:
         _cleanup(email)
