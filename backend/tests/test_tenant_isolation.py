@@ -4,9 +4,14 @@ Valide que la RLS (plan app_api) empêche tout accès inter-tenant, en lecture E
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from app.db.models import Alert, Email, ParsingError, Report, Tenant
+from app.api import public
+from app.auth.middleware import TenantMiddleware
+from app.db.models import Alert, ApiKey, Email, ParsingError, Report, Tenant
 from app.db.session import get_session, tenant_scoped_session
+from app.services import api_keys
 from app.workers import tasks
 
 
@@ -298,4 +303,67 @@ def test_le_balayage_scope_bien_chaque_tenant(seed_two_tenants, monkeypatch):
         with get_session() as db:
             db.query(Alert).filter_by(tenant_id=tid_a).delete(synchronize_session=False)
             db.query(Alert).filter_by(tenant_id=tid_b).delete(synchronize_session=False)
+            db.commit()
+
+
+# --------------------------------------------------------------- Isolation clés API
+def _api_client():
+    app = FastAPI()
+    app.add_middleware(TenantMiddleware)
+    app.include_router(public.router)
+    return TestClient(app)
+
+
+def _domain_key_for(tid: str) -> str:
+    secret, prefix, h = api_keys.generate_key("domain")
+    with get_session() as db:
+        db.add(ApiKey(scope="domain", tenant_id=tid, prefix=prefix, key_hash=h,
+                      label="iso", created_by="iso@test"))
+        db.commit()
+    return secret
+
+
+def test_api_key_domain_a_ne_voit_que_a(seed_two_tenants):
+    tid_a, tid_b = seed_two_tenants
+    secret = _domain_key_for(tid_a)
+    try:
+        client = _api_client()
+        r = client.get("/v1/domains", headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 200
+        ids = {d["id"] for d in r.json()}
+        assert ids == {tid_a}                 # jamais B
+    finally:
+        with get_session() as db:
+            db.query(ApiKey).filter_by(key_hash=api_keys.hash_secret(secret)).delete()
+            db.commit()
+
+
+def test_api_key_domain_ne_peut_pas_creer_ni_lire_quarantaine(seed_two_tenants):
+    tid_a, _ = seed_two_tenants
+    secret = _domain_key_for(tid_a)
+    try:
+        client = _api_client()
+        h = {"Authorization": f"Bearer {secret}"}
+        assert client.post("/v1/domains", headers=h, json={"domain": "x.test"}).status_code == 403
+        assert client.get("/v1/quarantine", headers=h).status_code == 403
+    finally:
+        with get_session() as db:
+            db.query(ApiKey).filter_by(key_hash=api_keys.hash_secret(secret)).delete()
+            db.commit()
+
+
+def test_api_key_ne_peut_pas_toucher_admin(seed_two_tenants):
+    tid_a, _ = seed_two_tenants
+    secret = _domain_key_for(tid_a)
+    try:
+        # Monte le routeur admin DERRIÈRE le vrai middleware : une clé sk_ hors /api/v1 → 403.
+        from app.api.admin import router as admin_router
+        app = FastAPI()
+        app.add_middleware(TenantMiddleware)
+        app.include_router(admin_router)
+        r = TestClient(app).get("/admin/tenants", headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 403
+    finally:
+        with get_session() as db:
+            db.query(ApiKey).filter_by(key_hash=api_keys.hash_secret(secret)).delete()
             db.commit()
