@@ -11,6 +11,7 @@ export interface Me {
   company: string | null;
   address: string | null;
   phone: string | null;
+  pending_email: string | null;
 }
 
 /* Le JWT ne porte que des UUID de domaines. /auth/me les résout en noms lisibles,
@@ -33,8 +34,7 @@ export function useUpdateProfile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: {
-      email: string; first_name: string; last_name: string;
-      company: string; address: string; phone: string;
+      first_name: string; last_name: string; company: string; address: string; phone: string;
     }) =>
       api<void>("/auth/me", {
         method: "PATCH",
@@ -44,3 +44,23 @@ export function useUpdateProfile() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
 }
+
+export const useRequestEmailChange = () =>
+  useMutation({
+    mutationFn: (body: { new_email: string }) =>
+      api<void>("/auth/me/email/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+  });
+
+export const useConfirmEmailChange = () =>
+  useMutation({
+    mutationFn: (body: { code: string }) =>
+      api<void>("/auth/me/email/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+  });
