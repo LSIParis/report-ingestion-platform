@@ -51,6 +51,10 @@ class AppUser(Base):
     company: Mapped[str | None] = mapped_column(Text)
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(Text)
+    pending_email: Mapped[str | None] = mapped_column(Text)
+    email_code_hash: Mapped[str | None] = mapped_column(Text)
+    email_code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_code_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
 
 class UserTenant(Base):
