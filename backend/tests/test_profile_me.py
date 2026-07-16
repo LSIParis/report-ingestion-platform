@@ -80,8 +80,9 @@ def test_patch_me_ignore_role_et_domaines():
     _make_user(email)
     try:
         c = _client(email)
-        c.patch("/auth/me", json={"email": email, "role": "platform_admin",
-                                  "tenant_ids": []})
+        r = c.patch("/auth/me", json={"email": email, "role": "platform_admin",
+                                      "tenant_ids": []})
+        assert r.status_code == 204
         with get_session() as db:
             u = db.query(AppUser).filter_by(email=email).first()
             assert u.role == "tenant_viewer"
