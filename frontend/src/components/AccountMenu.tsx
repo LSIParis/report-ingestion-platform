@@ -5,6 +5,7 @@ import { useMe } from "../api/account";
 import { clearSession } from "../auth/session";
 import { useTenant } from "../auth/tenant";
 import { PasswordDialog } from "./PasswordDialog";
+import { ProfileDialog, toProfileValues } from "./ProfileDialog";
 
 const MIN_PASSWORD = 12;
 
@@ -14,6 +15,7 @@ export function AccountMenu() {
   const me = useMe();
   const [open, setOpen] = useState(false);
   const [pwOpen, setPwOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
   // Fermer au clic extérieur et à Échap : sans ça, le menu reste ouvert derrière
@@ -143,6 +145,14 @@ export function AccountMenu() {
             <MenuItem
               onClick={() => {
                 setOpen(false);
+                setProfileOpen(true);
+              }}
+            >
+              Mon profil
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setOpen(false);
                 setPwOpen(true);
               }}
             >
@@ -156,6 +166,14 @@ export function AccountMenu() {
       )}
 
       {pwOpen && <PasswordDialog minLength={MIN_PASSWORD} onClose={() => setPwOpen(false)} />}
+
+      {profileOpen && me.data && (
+        <ProfileDialog
+          mode="self"
+          initial={toProfileValues(me.data)}
+          onClose={() => setProfileOpen(false)}
+        />
+      )}
     </div>
   );
 }
