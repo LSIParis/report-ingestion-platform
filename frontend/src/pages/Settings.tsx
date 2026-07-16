@@ -12,6 +12,7 @@ import {
   useUsers,
   type User,
 } from "../api/users";
+import { ProfileDialog, toProfileValues } from "../components/ProfileDialog";
 
 export function Settings() {
   const me = useMe();
@@ -86,6 +87,7 @@ function Row({
   const remove = useDeleteUser();
   const reset = useResetPassword();
   const [editing, setEditing] = useState(false);
+  const [fiche, setFiche] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [newPassword, setNewPassword] = useState<string | null>(null);
   const admin = user.role === "platform_admin";
@@ -126,6 +128,15 @@ function Row({
           )}
         </td>
         <td className="px-4 py-3 text-right whitespace-nowrap">
+          <button
+            onClick={() => !isSelf && setFiche(true)}
+            disabled={isSelf}
+            title={isSelf ? "Modifiez votre propre fiche via « Mon profil »" : undefined}
+            className="text-xs text-gray-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+          >
+            Fiche
+          </button>
+          <span className="mx-2 text-gray-300">·</span>
           <button onClick={() => setEditing((e) => !e)} className="text-xs text-gray-600 hover:underline">
             Modifier
           </button>
@@ -151,6 +162,19 @@ function Row({
           </button>
         </td>
       </tr>
+
+      {fiche && (
+        <tr>
+          <td colSpan={4} className="p-0">
+            <ProfileDialog
+              mode="admin"
+              userId={user.id}
+              initial={toProfileValues(user)}
+              onClose={() => setFiche(false)}
+            />
+          </td>
+        </tr>
+      )}
 
       {newPassword && (
         <tr className="border-t bg-amber-50">

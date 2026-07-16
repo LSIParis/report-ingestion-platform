@@ -8,6 +8,11 @@ export interface User {
   role: "platform_admin" | "tenant_viewer";
   tenants: { id: string; domain: string }[];
   created_at: string;
+  first_name: string | null;
+  last_name: string | null;
+  company: string | null;
+  address: string | null;
+  phone: string | null;
 }
 
 export const useUsers = () =>
@@ -32,7 +37,11 @@ export function useCreateUser() {
 export function useUpdateUser() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...b }: { id: string; role?: string; tenant_ids?: string[] }) =>
+    mutationFn: ({ id, ...b }: {
+      id: string; role?: string; tenant_ids?: string[]; email?: string;
+      first_name?: string; last_name?: string; company?: string;
+      address?: string; phone?: string;
+    }) =>
       api<User>(`/admin/users/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },

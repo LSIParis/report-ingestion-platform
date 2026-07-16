@@ -46,6 +46,15 @@ class AppUser(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    first_name: Mapped[str | None] = mapped_column(Text)
+    last_name: Mapped[str | None] = mapped_column(Text)
+    company: Mapped[str | None] = mapped_column(Text)
+    address: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    pending_email: Mapped[str | None] = mapped_column(Text)
+    email_code_hash: Mapped[str | None] = mapped_column(Text)
+    email_code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_code_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
 
 class UserTenant(Base):
