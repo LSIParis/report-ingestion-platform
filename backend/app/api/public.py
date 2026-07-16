@@ -8,8 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 
 from app.api import metrics as metrics_api
+from app.api.admin import TenantIn  # réutilise la validation de domaine
 from app.auth.deps import get_db, get_tenant_ctx
-from app.db.models import Report, Tenant
+from app.db.models import Email, Report, Tenant
+from app.db.session import tenant_scoped_session
+from app.services.audit import audit
+from app.services.tenants import ensure_tenant
 
 router = APIRouter(prefix="/v1", tags=["public"])
 
@@ -55,3 +59,32 @@ def reports_summary(days: int = Query(30, ge=1, le=365), db=Depends(get_db)):
 def metrics_timeseries(days: int = Query(30, ge=1, le=365), db=Depends(get_db)):
     """Série quotidienne conforme/échoué (réutilise metrics.dmarc_timeseries)."""
     return metrics_api.dmarc_timeseries(days=days, db=db)
+
+
+@router.get("/quarantine", dependencies=[Depends(require_platform)])
+def quarantine():
+    """Rapports non attribués (tenant_id NULL, needs_review). Cross-tenant → plateforme."""
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        rows = (db.query(Email)
+                  .filter(Email.tenant_id.is_(None), Email.status == "needs_review")
+                  .order_by(Email.received_at.desc()).limit(500).all())
+        return [{"id": str(e.id), "message_id": e.message_id, "from_address": e.from_address,
+                 "subject": e.subject,
+                 "received_at": e.received_at.isoformat() if e.received_at else None}
+                for e in rows]
+
+
+@router.post("/domains", status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(require_platform)])
+def create_domain(body: TenantIn, ctx=Depends(get_tenant_ctx)):
+    """Crée un domaine (= un tenant). Même logique que POST /admin/tenants."""
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        if db.query(Tenant).filter_by(domain=body.domain).first():
+            raise HTTPException(status.HTTP_409_CONFLICT, "Ce domaine est déjà surveillé")
+        tenant, _ = ensure_tenant(db, body.domain, body.name)
+        out = {"id": str(tenant.id), "domain": tenant.domain, "name": tenant.name}
+        db.commit()
+
+    audit(actor=ctx.user, action="tenant.created", target_id=out["id"],
+          metadata={"domain": out["domain"], "via": "api_v1"})
+    return out
