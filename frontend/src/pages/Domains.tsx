@@ -12,6 +12,15 @@ import {
 import { MtaStsPanel } from "../components/MtaStsPanel";
 import { OnboardingPanel } from "../components/OnboardingPanel";
 
+type StatusFilter = "all" | "active" | "waiting" | "suspended";
+
+// L'état affiché d'un domaine, dérivé comme dans <Row> : suspendu (non actif),
+// « en attente » (actif mais aucun rapport reçu), ou actif.
+function domainState(d: Domain): Exclude<StatusFilter, "all"> {
+  if (d.status !== "active") return "suspended";
+  return d.reports === 0 ? "waiting" : "active";
+}
+
 export function Domains() {
   const domains = useDomains();
   const requeue = useRequeueQuarantine();
@@ -19,11 +28,22 @@ export function Domains() {
   const [procedure, setProcedure] = useState<string | null>(null);
   const [tls, setTls] = useState<Domain | null>(null);
   const [requeued, setRequeued] = useState<number | null>(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
   async function runRequeue() {
     const r = await requeue.mutateAsync();
     setRequeued(r.requeued);
   }
+
+  const all = domains.data ?? [];
+  const q = query.trim().toLowerCase();
+  const filtered = all.filter((d) => {
+    if (statusFilter !== "all" && domainState(d) !== statusFilter) return false;
+    if (!q) return true;
+    return d.domain.toLowerCase().includes(q) || d.name.toLowerCase().includes(q);
+  });
+  const filtering = q !== "" || statusFilter !== "all";
 
   return (
     <div className="space-y-6 p-6">
@@ -43,6 +63,46 @@ export function Domains() {
         </button>
       </header>
 
+      {/* Filtre client sur la liste déjà chargée : recherche (domaine ou nom du
+          client) + puces d'état. Aucun appel réseau. */}
+      {all.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Rechercher un domaine ou un client…"
+            className="w-64 rounded border px-3 py-1.5 text-sm"
+          />
+          <div className="flex gap-1">
+            {(
+              [
+                ["all", "Tous"],
+                ["active", "Actifs"],
+                ["waiting", "En attente"],
+                ["suspended", "Suspendus"],
+              ] as [StatusFilter, string][]
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => setStatusFilter(value)}
+                className={`rounded-full px-3 py-1 text-xs ${
+                  statusFilter === value
+                    ? "bg-gray-900 text-white"
+                    : "border text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {filtering && (
+            <span className="text-xs text-gray-500">
+              {filtered.length} / {all.length}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded border bg-white">
         <table className="w-full text-sm">
           <thead>
@@ -55,7 +115,7 @@ export function Domains() {
             </tr>
           </thead>
           <tbody>
-            {(domains.data ?? []).map((d) => (
+            {filtered.map((d) => (
               <Row
                 key={d.id}
                 domain={d}
@@ -63,10 +123,17 @@ export function Domains() {
                 onTls={() => setTls(d)}
               />
             ))}
-            {domains.isSuccess && domains.data!.length === 0 && (
+            {domains.isSuccess && all.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
                   Aucun domaine surveillé.
+                </td>
+              </tr>
+            )}
+            {domains.isSuccess && all.length > 0 && filtered.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
+                  Aucun domaine ne correspond au filtre.
                 </td>
               </tr>
             )}
@@ -279,9 +346,30 @@ function Row({
   );
 }
 
+const DOMAIN_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+// Une saisie libre (une zone de texte) → une liste de domaines nettoyés. On accepte
+// tout séparateur courant (retour ligne, virgule, point-virgule, espace), on met en
+// minuscules, on retire un « @ » de tête, et on dédoublonne en gardant l'ordre.
+function parseDomains(text: string): { valid: string[]; invalid: string[] } {
+  const seen = new Set<string>();
+  const valid: string[] = [];
+  const invalid: string[] = [];
+  for (const raw of text.split(/[\s,;]+/)) {
+    const clean = raw.trim().toLowerCase().replace(/^@/, "");
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    (DOMAIN_RE.test(clean) ? valid : invalid).push(clean);
+  }
+  return { valid, invalid };
+}
+
+type CreateOutcome = { domain: string; status: "created" | "exists" | "error"; id?: string };
+
 /* La création ne fait qu'inscrire le domaine dans la base : tant que le DNS n'est pas
-   posé, aucun rapport n'arrivera. On enchaîne donc directement sur la procédure, plutôt
-   que d'afficher un « créé ! » qui laisserait croire que c'est terminé. */
+   posé, aucun rapport n'arrivera. Pour un domaine unique on enchaîne donc directement
+   sur la procédure ; pour un ajout multiple on affiche un récapitulatif, chaque ligne
+   du tableau gardant son bouton « Procédure ». */
 function CreateDialog({
   onClose,
   onCreated,
@@ -290,89 +378,160 @@ function CreateDialog({
   onCreated: (id: string) => void;
 }) {
   const create = useCreateDomain();
-  const [domain, setDomain] = useState("");
+  const [text, setText] = useState("");
   const [name, setName] = useState("");
-  const [error, setError] = useState("");
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState<CreateOutcome[] | null>(null);
 
-  const clean = domain.trim().toLowerCase().replace(/^@/, "");
-  const ready = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(clean);
+  const { valid, invalid } = parseDomains(text);
+  const single = valid.length === 1;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
-    try {
-      const created = await create.mutateAsync({
-        domain: clean,
-        name: name.trim() || undefined,
-      });
-      onCreated(created.id);
-    } catch (err) {
-      setError(
-        err instanceof ApiError && err.status === 409
-          ? "Ce domaine est déjà surveillé."
-          : "Création impossible.",
-      );
+    if (!valid.length || running) return;
+    setRunning(true);
+    const outcomes: CreateOutcome[] = [];
+    for (const domain of valid) {
+      try {
+        const created = await create.mutateAsync({
+          domain,
+          // Le nom ne s'applique qu'à un ajout unitaire (une seule ligne).
+          name: single ? name.trim() || undefined : undefined,
+        });
+        outcomes.push({ domain, status: "created", id: created.id });
+      } catch (err) {
+        outcomes.push({
+          domain,
+          status: err instanceof ApiError && err.status === 409 ? "exists" : "error",
+        });
+      }
     }
+    setRunning(false);
+
+    // Cas unitaire réussi : on garde l'enchaînement historique vers la procédure DNS.
+    const created = outcomes.filter((o) => o.status === "created");
+    if (valid.length === 1 && invalid.length === 0 && created.length === 1) {
+      onCreated(created[0].id!);
+      return;
+    }
+    setResults(outcomes);
+  }
+
+  if (results) {
+    const createdCount = results.filter((o) => o.status === "created").length;
+    return (
+      <Shell onClose={onClose}>
+        <h2 className="font-semibold">Ajout terminé</h2>
+        <p className="text-sm text-gray-600">
+          {createdCount} domaine(s) créé(s) sur {results.length} traité(s).
+          {createdCount > 0 &&
+            " Ouvrez la procédure DNS de chacun depuis le tableau (bouton « Procédure »)."}
+        </p>
+        <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
+          {results.map((o) => (
+            <li key={o.domain} className="flex items-center justify-between gap-3">
+              <span className="font-mono">{o.domain}</span>
+              <OutcomeBadge status={o.status} />
+            </li>
+          ))}
+          {invalid.map((d) => (
+            <li key={d} className="flex items-center justify-between gap-3">
+              <span className="font-mono">{d}</span>
+              <OutcomeBadge status="invalid" />
+            </li>
+          ))}
+        </ul>
+        <div className="flex justify-end">
+          <button onClick={onClose} className="rounded bg-gray-900 px-3 py-1.5 text-sm text-white">
+            Fermer
+          </button>
+        </div>
+      </Shell>
+    );
   }
 
   return (
-    <div
-      className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4"
-      onMouseDown={onClose}
-    >
-      <form
-        onSubmit={submit}
-        onMouseDown={(e) => e.stopPropagation()}
-        className="w-full max-w-md space-y-4 rounded border bg-white p-6"
-      >
-        <h2 className="font-semibold">Ajouter un domaine</h2>
+    <Shell onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <h2 className="font-semibold">Ajouter un ou plusieurs domaines</h2>
 
         <label className="block">
-          <span className="text-xs text-gray-600">Domaine à surveiller</span>
-          <input
+          <span className="text-xs text-gray-600">
+            Domaines à surveiller — un par ligne (ou séparés par des virgules)
+          </span>
+          <textarea
             autoFocus
-            value={domain}
-            onChange={(e) => setDomain(e.target.value)}
-            placeholder="exemple.com"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={5}
+            placeholder={"exemple.com\nautre-client.fr"}
             className="mt-1 w-full rounded border px-3 py-2 font-mono text-sm"
           />
-          {domain && !ready && (
-            <span className="mt-1 block text-xs text-amber-700">
-              Attendu : un nom de domaine (exemple.com), pas une adresse e-mail.
-            </span>
-          )}
+          <span className="mt-1 block text-xs text-gray-500">
+            {valid.length} domaine(s) valide(s)
+            {invalid.length > 0 && (
+              <span className="text-amber-700"> · {invalid.length} ignoré(s) : {invalid.join(", ")}</span>
+            )}
+          </span>
         </label>
 
-        <label className="block">
-          <span className="text-xs text-gray-600">Nom du client (facultatif)</span>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Exemple SA"
-            className="mt-1 w-full rounded border px-3 py-2 text-sm"
-          />
-        </label>
+        {single && (
+          <label className="block">
+            <span className="text-xs text-gray-600">Nom du client (facultatif)</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Exemple SA"
+              className="mt-1 w-full rounded border px-3 py-2 text-sm"
+            />
+          </label>
+        )}
 
         <p className="rounded bg-gray-50 p-3 text-xs text-gray-600">
-          La règle qui reconnaît les rapports de ce domaine est créée automatiquement.
-          La procédure DNS complète — six enregistrements sur deux zones — s'affichera
-          juste après, et se vérifiera toute seule.
+          La règle qui reconnaît les rapports de chaque domaine est créée automatiquement.
+          La procédure DNS complète — six enregistrements sur deux zones — reste à faire pour
+          chacun, et se vérifie toute seule.
         </p>
-
-        {error && <p className="text-sm text-red-600">{error}</p>}
 
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="flex-1 rounded border py-2 text-sm">
             Annuler
           </button>
           <button
-            disabled={!ready || create.isPending}
+            disabled={!valid.length || running}
             className="flex-1 rounded bg-gray-900 py-2 text-sm text-white disabled:opacity-40"
           >
-            {create.isPending ? "…" : "Créer"}
+            {running ? "…" : valid.length > 1 ? `Créer ${valid.length} domaines` : "Créer"}
           </button>
         </div>
       </form>
+    </Shell>
+  );
+}
+
+function Shell({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4"
+      onMouseDown={onClose}
+    >
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        className="w-full max-w-md space-y-4 rounded border bg-white p-6"
+      >
+        {children}
+      </div>
     </div>
   );
+}
+
+function OutcomeBadge({ status }: { status: CreateOutcome["status"] | "invalid" }) {
+  const map = {
+    created: ["bg-emerald-100 text-emerald-800", "créé"],
+    exists: ["bg-gray-200 text-gray-700", "déjà surveillé"],
+    error: ["bg-red-100 text-red-800", "échec"],
+    invalid: ["bg-amber-100 text-amber-800", "invalide"],
+  } as const;
+  const [cls, label] = map[status];
+  return <span className={`rounded px-1.5 py-0.5 text-xs ${cls}`}>{label}</span>;
 }
