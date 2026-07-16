@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     imap_user: str = ""
     imap_password: str = ""
 
+    # --- Envoi SMTP (e-mail sortant : verification e-mail, alertes) ---
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "no-reply@lsiparis.tech"
+
     # --- JWT (RS256) ---
     jwt_public_key: str = ""
     jwt_private_key: str = ""
