@@ -1,16 +1,19 @@
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.auth.deps import get_tenant_ctx
+from app.auth.emails import normalize_email
 from app.auth.passwords import hash_password, verify_password
 from app.config import settings
 from app.db.models import AppUser, Tenant, UserTenant
 from app.db.session import get_session, tenant_scoped_session
 from app.services.audit import audit
+from app.services.mailer import EmailNonEnvoye, send_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -126,6 +129,101 @@ def update_me(body: ProfileIn, ctx=Depends(get_tenant_ctx)):
         db.commit()
 
     audit(actor=ctx.user, action="user.profile_updated", tenant_id=ctx.active_tenant)
+
+
+CODE_TTL = timedelta(minutes=15)
+MAX_CODE_ATTEMPTS = 5
+
+
+class EmailRequestIn(BaseModel):
+    new_email: str
+
+    @field_validator("new_email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        return normalize_email(v)
+
+
+class EmailConfirmIn(BaseModel):
+    code: str
+
+
+def _purge_pending(user) -> None:
+    user.pending_email = None
+    user.email_code_hash = None
+    user.email_code_expires_at = None
+    user.email_code_attempts = 0
+
+
+@router.post("/me/email/request", status_code=status.HTTP_202_ACCEPTED)
+def request_email_change(body: EmailRequestIn, ctx=Depends(get_tenant_ctx)):
+    """Demande de changement d'e-mail : envoie un code a la NOUVELLE adresse. Rien n'est
+    ecrit tant que l'envoi n'a pas reussi (pas d'attente orpheline)."""
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        user = db.query(AppUser).filter_by(email=ctx.user).first()
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Compte introuvable")
+        if body.new_email == user.email:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "C'est deja votre adresse")
+        if db.query(AppUser).filter(AppUser.email == body.new_email,
+                                    AppUser.id != user.id).first():
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cet e-mail est deja utilise")
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        try:
+            send_email(
+                body.new_email,
+                "Confirmation de votre nouvelle adresse e-mail",
+                f"Votre code de confirmation est : {code}\n\n"
+                "Il expire dans 15 minutes. Si vous n'etes pas a l'origine de cette "
+                "demande, ignorez ce message.",
+            )
+        except EmailNonEnvoye as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                "Impossible d'envoyer le code, reessayez.") from exc
+
+        user.pending_email = body.new_email
+        user.email_code_hash = hash_password(code)
+        user.email_code_expires_at = datetime.now(timezone.utc) + CODE_TTL
+        user.email_code_attempts = 0
+        db.commit()
+
+    audit(actor=ctx.user, action="user.email_change_requested", tenant_id=ctx.active_tenant)
+
+
+@router.post("/me/email/confirm", status_code=status.HTTP_204_NO_CONTENT)
+def confirm_email_change(body: EmailConfirmIn, ctx=Depends(get_tenant_ctx)):
+    """Confirme le code -> applique le changement d'e-mail. Le front se reconnecte ensuite."""
+    with tenant_scoped_session(tenant_id=None, bypass=True) as db:
+        user = db.query(AppUser).filter_by(email=ctx.user).first()
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Compte introuvable")
+
+        expire = (user.email_code_expires_at is None
+                  or user.email_code_expires_at < datetime.now(timezone.utc))
+        if not user.pending_email or not user.email_code_hash or expire:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Aucun changement d'e-mail en attente ou code expire.")
+        if user.email_code_attempts >= MAX_CODE_ATTEMPTS:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                "Trop d'essais, redemandez un code.")
+        if not verify_password(body.code, user.email_code_hash):
+            user.email_code_attempts += 1
+            db.commit()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code incorrect.")
+
+        # Course : la nouvelle adresse a pu etre prise entre la demande et la confirmation.
+        if db.query(AppUser).filter(AppUser.email == user.pending_email,
+                                    AppUser.id != user.id).first():
+            _purge_pending(user)
+            db.commit()
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cet e-mail est deja utilise")
+
+        user.email = user.pending_email
+        _purge_pending(user)
+        db.commit()
+
+    audit(actor=ctx.user, action="user.email_changed", tenant_id=ctx.active_tenant)
 
 
 class PasswordIn(BaseModel):
