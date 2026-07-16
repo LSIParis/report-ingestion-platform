@@ -134,6 +134,8 @@ function Row({
   const remove = useDeleteDomain();
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
+  const [alerting, setAlerting] = useState(false);
+  const [emails, setEmails] = useState(d.alert_email ?? "");
   const suspended = d.status !== "active";
   const silent = d.reports === 0;
 
@@ -187,6 +189,10 @@ function Row({
             Chiffrement
           </button>
           <span className="mx-2 text-gray-300">·</span>
+          <button onClick={() => setAlerting((a) => !a)} className="text-xs text-gray-600 hover:underline">
+            Alertes
+          </button>
+          <span className="mx-2 text-gray-300">·</span>
           <button
             onClick={() => update.mutate({ id: d.id, active: suspended })}
             className="text-xs text-gray-600 hover:underline"
@@ -202,6 +208,41 @@ function Row({
           </button>
         </td>
       </tr>
+
+      {alerting && (
+        <tr className="border-t bg-gray-50">
+          <td colSpan={5} className="px-4 py-3">
+            <label className="block text-sm">
+              <span className="text-xs text-gray-600">
+                Destinataire(s) des alertes e-mail — adresses séparées par des virgules
+                (vide = aucune)
+              </span>
+              <input
+                value={emails}
+                onChange={(e) => setEmails(e.target.value)}
+                placeholder="ops@client.fr, secu@client.fr"
+                className="mt-1 w-full rounded border px-3 py-2 text-sm"
+              />
+            </label>
+            <div className="mt-2 flex gap-2">
+              <button
+                onClick={() =>
+                  update.mutate(
+                    { id: d.id, alert_email: emails },
+                    { onSuccess: () => setAlerting(false) },
+                  )
+                }
+                className="rounded bg-gray-900 px-3 py-1.5 text-sm text-white"
+              >
+                Enregistrer
+              </button>
+              <button onClick={() => setAlerting(false)} className="rounded border px-3 py-1.5 text-sm">
+                Annuler
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
 
       {confirming && (
         <tr className="border-t bg-red-50">

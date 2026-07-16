@@ -55,6 +55,18 @@ class TenantIn(BaseModel):
 class TenantPatch(BaseModel):
     name: str | None = None
     active: bool | None = None
+    alert_email: str | None = None
+
+    @field_validator("alert_email")
+    @classmethod
+    def _alert_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        for frag in v.split(","):
+            frag = frag.strip()
+            if frag and "@" not in frag:
+                raise ValueError("adresse e-mail invalide dans la liste")
+        return v
 
 
 @router.get("/tenants")
@@ -80,6 +92,7 @@ def list_tenants():
             out.append({
                 "id": str(t.id), "domain": t.domain, "name": t.name,
                 "status": t.status,
+                "alert_email": t.alert_email,
                 "reports": reports,
                 "last_report_at": last.isoformat() if last else None,
                 "active_rules": rules.get(t.id, 0),
@@ -112,8 +125,11 @@ def update_tenant(tenant_id: str, body: TenantPatch, ctx=Depends(get_tenant_ctx)
             tenant.name = body.name.strip() or tenant.domain
         if body.active is not None:
             set_tenant_active(db, tenant, body.active)
+        if body.alert_email is not None:
+            tenant.alert_email = body.alert_email.strip() or None
         out = {"id": str(tenant.id), "domain": tenant.domain,
-               "name": tenant.name, "status": tenant.status}
+               "name": tenant.name, "status": tenant.status,
+               "alert_email": tenant.alert_email}
         db.commit()
 
     audit(actor=ctx.user, action="tenant.updated", target_id=tenant_id, metadata=out)

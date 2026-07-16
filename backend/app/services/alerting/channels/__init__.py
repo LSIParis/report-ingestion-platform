@@ -6,9 +6,9 @@ d'alertes n'en sait rien : il appelle `get_channel().envoyer(...)`.
 from __future__ import annotations
 
 from app.config import settings
-from app.services.alerting.channels import desk365, webhook
+from app.services.alerting.channels import desk365, email, webhook
 
-_CANAUX = {"webhook": webhook, "desk365": desk365}
+_CANAUX = {"webhook": webhook, "desk365": desk365, "email": email}
 
 
 def get_channel():

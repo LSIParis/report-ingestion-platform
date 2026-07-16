@@ -38,6 +38,10 @@ class Tenant(Base):
     mta_sts_updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
 
+    # Destinataire(s) des alertes e-mail pour ce domaine (liste separee par virgules).
+    # Vide -> le canal e-mail n'envoie rien pour ce tenant (journalise, jamais un plantage).
+    alert_email: Mapped[str | None] = mapped_column(Text)
+
 
 class AppUser(Base):
     __tablename__ = "app_user"
